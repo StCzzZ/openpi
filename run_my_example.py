@@ -4,7 +4,7 @@ from openpi.shared import download
 from openpi.policies import my_policy
 
 config = _config.get_config("pi05_flexiv")
-checkpoint_dir = "/home/yuwenye/common/openpi/checkpoints/pi05_flexiv/my_data/3000"
+checkpoint_dir = "/home/yuwenye/project/openpi/checkpoints/pi05_flexiv/my_data/29999"
 
 policy = policy_config.create_trained_policy(config, checkpoint_dir)
 
