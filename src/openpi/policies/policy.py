@@ -105,6 +105,42 @@ class Policy(BasePolicy):
         }
         return outputs
 
+    @override
+    def infer_batch(self, obs:dict, *, noise: np.ndarray | None = None) -> dict:
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        if not self._is_pytorch_model:
+            # Make a batch and convert to jax.Array.
+            inputs = jax.tree.map(lambda x: jnp.asarray(x), inputs)
+            self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
+        else:
+            # Convert inputs to PyTorch tensors and move to correct device
+            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device), inputs)
+            sample_rng_or_pytorch_device = self._pytorch_device
+
+        sample_kwargs = dict(self._sample_kwargs)
+        if noise is not None:
+            noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
+            sample_kwargs["noise"] = noise
+
+        observation = _model.Observation.from_dict(inputs)
+        start_time = time.monotonic()
+        outputs = {
+            "state": inputs["state"],
+            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+        }
+        model_time = time.monotonic() - start_time
+        if self._is_pytorch_model:
+            outputs = jax.tree.map(lambda x: np.asarray(x.detach().cpu()), outputs)
+        else:
+            outputs = jax.tree.map(lambda x: np.asarray(x), outputs)
+
+        outputs = self._output_transform(outputs)
+        outputs["policy_timing"] = {
+            "infer_ms": model_time * 1000,
+        }
+        return outputs
+
     @property
     def metadata(self) -> dict[str, Any]:
         return self._metadata

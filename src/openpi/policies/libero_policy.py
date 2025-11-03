@@ -21,8 +21,10 @@ def _parse_image(image) -> np.ndarray:
     image = np.asarray(image)
     if np.issubdtype(image.dtype, np.floating):
         image = (255 * image).astype(np.uint8)
-    if image.shape[0] == 3:
+    if len(image.shape) == 3 and image.shape[0] == 3:
         image = einops.rearrange(image, "c h w -> h w c")
+    if len(image.shape) == 4 and image.shape[1] == 3:
+        image = einops.rearrange(image, "b c h w -> b h w c")
     return image
 
 
@@ -97,4 +99,4 @@ class LiberoOutputs(transforms.DataTransformFn):
         # dimension, we need to now parse out the correct number of actions in the return dict.
         # For Libero, we only return the first 7 actions (since the rest is padding).
         # For your own dataset, replace `7` with the action dimension of your dataset.
-        return {"actions": np.asarray(data["actions"][:, :7])}
+        return {"actions": np.asarray(data["actions"][..., :7])}

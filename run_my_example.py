@@ -9,6 +9,6 @@ checkpoint_dir = "/home/yuwenye/project/openpi/checkpoints/pi05_flexiv/my_data/2
 policy = policy_config.create_trained_policy(config, checkpoint_dir)
 
 example = my_policy.make_my_example()
-action_chunk = policy.infer(example)["actions"]
+action_chunk = policy.infer_batch(example)["actions"]
 import pdb; pdb.set_trace()
 print(action_chunk)
