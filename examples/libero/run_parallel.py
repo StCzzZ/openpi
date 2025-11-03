@@ -35,7 +35,7 @@ class Args:
         "libero_spatial"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
-    num_trials_per_task: int = 50  # Number of rollouts per task
+    num_trials_per_task: int = 5  # Number of rollouts per task
     num_envs: int = 10  # Number of environments to run in parallel
 
     #################################################################################################################
@@ -92,7 +92,7 @@ def eval_libero_parallel(args: Args) -> None:
 
             # Reset environment
             env.reset()
-            action_plan = [collections.deque() for _ in range(args.num_envs)]
+            action_plan = collections.deque()
 
             # Set initial states
             indices = (np.arange(args.num_envs) + episode_idx) % initial_states.shape[0]
@@ -128,31 +128,30 @@ def eval_libero_parallel(args: Args) -> None:
                     # Save preprocessed image for replay video
                     replay_images.append(img[0])
 
-                    for i in range(args.num_envs):
-                        if not action_plan[i]:
-                        # Finished executing previous action chunk -- compute new chunk
-                        # Prepare observations dict
-                            element = {
-                                "observation/image": img[i],
-                                "observation/wrist_image": wrist_img[i],
-                                "observation/state": np.concatenate(
-                                    (
-                                        obs[i]["robot0_eef_pos"],
-                                        _quat2axisangle(obs[i]["robot0_eef_quat"]),
-                                        obs[i]["robot0_gripper_qpos"],
-                                    )
-                                ),
-                                "prompt": str(task_description),
-                            }
+                    if not action_plan:
+                    # Finished executing previous action chunk -- compute new chunk
+                    # Prepare observations dict
+                        element = {
+                            "observation/image": img,
+                            "observation/wrist_image": wrist_img,
+                            "observation/state": np.stack([np.concatenate(
+                                (
+                                    x["robot0_eef_pos"],
+                                    _quat2axisangle(x["robot0_eef_quat"]),
+                                    x["robot0_gripper_qpos"],
+                                )
+                            ) for x in obs], axis=0),
+                            "prompt": np.array([str(task_description) for _ in range(args.num_envs)]),
+                        }
 
-                            # Query model to get action
-                            action_chunk = client.infer(element)["actions"]
-                            assert (
-                                len(action_chunk) >= args.replan_steps
-                            ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
-                            action_plan[i].extend(action_chunk[: args.replan_steps])
+                        # Query model to get action
+                        action_chunk = client.infer(element)["actions"]
+                        assert (
+                            len(action_chunk[0]) >= args.replan_steps
+                        ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk[0])} steps."
+                        action_plan.extend(action_chunk[:, :args.replan_steps].transpose(1,0,2))
 
-                    action = np.stack([action_plan[i].popleft() for i in range(args.num_envs)], axis=0)
+                    action = action_plan.popleft()
 
                     # Execute action in environment
                     obs, reward, done, info = env.step(action)

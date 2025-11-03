@@ -24,13 +24,15 @@ class WebsocketPolicyServer:
         host: str = "0.0.0.0",
         port: int | None = None,
         metadata: dict | None = None,
+        is_batched: bool = False,
     ) -> None:
         self._policy = policy
         self._host = host
         self._port = port
         self._metadata = metadata or {}
         logging.getLogger("websockets.server").setLevel(logging.INFO)
-
+        self._is_batched = is_batched
+    
     def serve_forever(self) -> None:
         asyncio.run(self.run())
 
@@ -58,7 +60,7 @@ class WebsocketPolicyServer:
                 obs = msgpack_numpy.unpackb(await websocket.recv())
 
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+                action = self._policy.infer_batch(obs) if self._is_batched else self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {

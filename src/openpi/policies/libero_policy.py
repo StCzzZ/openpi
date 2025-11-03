@@ -54,6 +54,17 @@ class LiberoInputs(transforms.DataTransformFn):
         base_image = _parse_image(data["observation/image"])
         wrist_image = _parse_image(data["observation/wrist_image"])
 
+        batch_size: int | None = None
+        if base_image.ndim == 4:
+            batch_size = base_image.shape[0]
+        elif wrist_image.ndim == 4:
+            batch_size = wrist_image.shape[0]
+
+        def make_mask(value: bool) -> np.ndarray | np.bool_:
+            if batch_size is None:
+                return np.bool_(value)
+            return np.full((batch_size,), value, dtype=bool)
+
         # Create inputs dict. Do not change the keys in the dict below.
         inputs = {
             "state": data["observation/state"],
@@ -64,10 +75,10 @@ class LiberoInputs(transforms.DataTransformFn):
                 "right_wrist_0_rgb": np.zeros_like(base_image),
             },
             "image_mask": {
-                "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
+                "base_0_rgb": make_mask(True),
+                "left_wrist_0_rgb": make_mask(True),
                 # We only mask padding images for pi0 model, not pi0-FAST. Do not change this for your own dataset.
-                "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
+                "right_wrist_0_rgb": make_mask(self.model_type == _model.ModelType.PI0_FAST),
             },
         }
 

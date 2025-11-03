@@ -7,13 +7,23 @@ from openpi import transforms
 from openpi.models import model as _model
 
 
-def make_my_example() -> dict:
+def make_my_batched_example() -> dict:
     """Creates a random input example for my policy."""
     return {
         "observation/state": np.random.rand(2, 6),
         "observation/image": np.random.randint(256, size=(2, 224, 224, 3), dtype=np.uint8),
         "observation/wrist_image": np.random.randint(256, size=(2, 224, 224, 3), dtype=np.uint8),
         "prompt": np.array(["do something", "do something else"]),
+    }
+
+
+def make_my_example() -> dict:
+    """Creates a random input example for my policy."""
+    return {
+        "observation/state": np.random.rand(6),
+        "observation/image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
+        "observation/wrist_image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
+        "prompt": "do something",
     }
 
 
