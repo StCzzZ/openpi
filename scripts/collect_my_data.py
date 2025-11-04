@@ -11,8 +11,19 @@ from hardware.my_device.macros import CAM_SERIAL
 
 def main(args):
     robot_env = RobotEnv(camera_serial=CAM_SERIAL, img_shape=[3]+args.resolution, fps=args.fps)
+    
+    # Determine starting episode_id based on existing file
     episode_id = 0
-    with h5py.File(args.save_path, 'w') as f:
+    if os.path.exists(args.save_path):
+        with h5py.File(args.save_path, 'r') as f:
+            # Find the highest episode_id in the existing file
+            episode_keys = [key for key in f.keys() if key.startswith('episode_')]
+            if episode_keys:
+                episode_ids = [int(key.split('_')[1]) for key in episode_keys]
+                episode_id = max(episode_ids) + 1
+                print(f"Appending to existing file. Starting from episode {episode_id}")
+    
+    with h5py.File(args.save_path, 'a') as f:
         while not robot_env.keyboard.quit:
             print("start recording...")
             tcp_pose = []
