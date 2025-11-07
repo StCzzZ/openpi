@@ -4,6 +4,7 @@ from scipy.spatial.transform import Rotation as R
 
 import sys
 import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import sigma7
 
 class Sigma7:

@@ -59,6 +59,7 @@ def main(args: Args):
                 # Initialize at the beginning of the episode
                 if cnt == 0:
                     random_init_pose = robot_env.robot.init_pose + np.random.uniform(-0.1, 0.1, size=7)
+                    random_init_pose[2] = max(random_init_pose[2], 0.15)
                     robot_env.reset_robot(random_init=True, random_init_pose=random_init_pose)
                     cnt += 1
                     print("Episode start!")
