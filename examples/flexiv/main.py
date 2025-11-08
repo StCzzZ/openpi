@@ -158,7 +158,7 @@ def main(args: Args) -> None:
                     action_plan.extend(action_chunk[:args.replan_steps])
                 # Execute action
                 action = action_plan.popleft()
-                robot_env.deploy_action(action[:6], action[6])
+                robot_env.deploy_action(action[:9], action[9])
                 # Save to buffer
                 episode_buffers['wrist_cam'].append(robot_state['wrist_img'])
                 episode_buffers['side_cam'].append(robot_state['side_img'])

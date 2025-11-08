@@ -6,7 +6,7 @@ import tyro
 import h5py
 import numpy as np
 
-REPO_NAME = "Virlus/flexiv_fold_towel_abs_action"
+REPO_NAME = "Virlus/flexiv_fold_towel_twice"
 
 def main(data_dir: str, *, push_to_hub: bool = False):
     # Clean up any existing dataset in the output directory
@@ -34,12 +34,12 @@ def main(data_dir: str, *, push_to_hub: bool = False):
             },
             "state": {
                 "dtype": "float32",
-                "shape": (6,),
+                "shape": (9,),
                 "names": ["state"],
             },
             "actions": {
                 "dtype": "float32",
-                "shape": (7,),
+                "shape": (10,),
                 "names": ["actions"],
             },
         },

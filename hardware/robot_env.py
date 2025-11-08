@@ -15,6 +15,7 @@ from hardware.my_device.sigma import Sigma7
 from hardware.my_device.logitechG29_wheel import Controller
 from hardware.my_device.macros import CAM_SERIAL, INTV, HUMAN, ROBOT
 
+from openpi.shared.rotation_utils import rotation_6d_to_matrix
 
 class RobotEnv:
     def __init__(self, camera_serial=CAM_SERIAL, img_shape=None, fps=10, is_multi_robot_env=False,robot_id=None,robot_info_dict=None):
@@ -76,7 +77,7 @@ class RobotEnv:
         # Get robot state
         tcp_pose, joint_pos, _, _ = self.robot.get_robot_state()
         tcp_pose_p = tcp_pose[:3]
-        tcp_pose_r = R.from_quat(tcp_pose[3:7], scalar_first=True).as_euler('XYZ', degrees=False)
+        tcp_pose_r = R.from_quat(tcp_pose[3:7], scalar_first=True).as_matrix()[:2, :].flatten()
         tcp_pose = np.concatenate((tcp_pose_p, tcp_pose_r), 0)
 
         # Get camera images
@@ -103,7 +104,7 @@ class RobotEnv:
     def deploy_action(self, tcp_action, gripper_action):
         action = np.concatenate((
             tcp_action[:3],
-            R.from_euler('XYZ', tcp_action[3:6], degrees=False).as_quat(scalar_first=True)
+            R.from_matrix(rotation_6d_to_matrix(tcp_action[3:9])).as_quat(scalar_first=True)
         ))
         self.robot.send_tcp_pose(action)
         self.gripper.move(gripper_action)
@@ -209,7 +210,7 @@ class RobotEnv:
             'side_img': state_data['side_img'],
             'tcp_pose': tcp_pose,
             'joint_pos': joint_pos,
-            'action': np.concatenate((diff_p, diff_r.as_euler('XYZ', degrees=False), [gripper_action])),
+            'action': np.concatenate((diff_p, diff_r.as_matrix()[:2, :].flatten(), [gripper_action])),
             'action_mode': INTV
         }
         

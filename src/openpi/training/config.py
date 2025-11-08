@@ -403,8 +403,8 @@ class LeRobotMyDataConfig(DataConfigFactory):
         # state in each action chunk). IF your data has ``absolute`` actions (e.g. target joint angles)
         # you can uncomment the following line to convert the actions to delta actions. The only exception
         # is for the gripper actions which are always absolute.
-        # In the example below, we would apply the delta conversion to the first 6 actions (joints) and
-        # leave the 7th action (gripper) unchanged, i.e. absolute.
+        # In the example below, we would apply the delta conversion to the first 9 actions (EEF pose) and
+        # leave the 10th action (gripper) unchanged, i.e. absolute.
         # In Libero, the raw actions in the dataset are already delta actions, so we *do not* need to
         # apply a separate delta conversion (that's why it's commented out). Choose whether to apply this
         # transform based on whether your dataset uses ``absolute`` or ``delta`` actions out of the box.
@@ -412,7 +412,7 @@ class LeRobotMyDataConfig(DataConfigFactory):
         # LIBERO already represents actions as deltas, but we have some old Pi0 checkpoints that are trained with this
         # extra delta transform.
         if self.extra_delta_transform:
-            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            delta_action_mask = _transforms.make_bool_mask(9, -1)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -833,7 +833,7 @@ _CONFIGS = [
         name="pi05_flexiv",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotMyDataConfig(
-            repo_id="Virlus/flexiv_fold_towel_abs_action",
+            repo_id="Virlus/fold_towel_twice",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
         ),
@@ -848,7 +848,7 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
-        num_train_steps=30_000,
+        num_train_steps=15_000,
     ),
     #
     # Fine-tuning Aloha configs.
