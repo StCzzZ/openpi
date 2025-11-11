@@ -5,8 +5,9 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 import tyro
 import h5py
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
-REPO_NAME = "Virlus/flexiv_fold_towel_twice"
+REPO_NAME = "Virlus/flexiv_fold_towel_twice_euler_angles"
 
 def main(data_dir: str, *, push_to_hub: bool = False):
     # Clean up any existing dataset in the output directory
@@ -34,12 +35,12 @@ def main(data_dir: str, *, push_to_hub: bool = False):
             },
             "state": {
                 "dtype": "float32",
-                "shape": (9,),
+                "shape": (6,),
                 "names": ["state"],
             },
             "actions": {
                 "dtype": "float32",
-                "shape": (10,),
+                "shape": (7,),
                 "names": ["actions"],
             },
         },
