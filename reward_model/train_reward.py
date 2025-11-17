@@ -26,6 +26,7 @@ class Args:
     num_epochs: int = 100
     num_workers: int = 4
     clip_grad: bool = True
+    video_rewind: bool = False
     device: str = "cuda"
     eval_every: int = 10
     save_every: int = 20
@@ -44,12 +45,14 @@ def main(args: Args):
     train_dataset = MultiStageDataset(
         dataset_path=args.dataset_path,
         num_stages=args.num_stages,
-        max_seq_len=args.max_seq_len
+        max_seq_len=args.max_seq_len,
+        video_rewind=args.video_rewind
     )
     val_dataset = MultiStageDataset(
         dataset_path=args.dataset_path,
         num_stages=args.num_stages,
-        max_seq_len=args.max_seq_len
+        max_seq_len=args.max_seq_len,
+        video_rewind=args.video_rewind
     )
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)

@@ -20,11 +20,12 @@ class MultiStageDataset(dataset.Dataset):
         num_stages: Number of stages in the specific task.
         max_seq_len: Maximum sequence length for reward modeling.
     """
-    def __init__(self, dataset_path, num_stages, max_seq_len):
+    def __init__(self, dataset_path, num_stages, max_seq_len, video_rewind):
         super().__init__()
         self.dataset_path = dataset_path
         self.num_stages = num_stages
         self.max_seq_len = max_seq_len
+        self.video_rewind = video_rewind
 
         self._load_dataset()
         self._calc_stage_prior()
@@ -56,7 +57,7 @@ class MultiStageDataset(dataset.Dataset):
         """
         Sample from a given episode to a fixed sequence length.
         """
-        start_index = np.random.randint(0, len(episode_dict['dino_embeddings']) - 3)
+        start_index = np.random.randint(0, len(episode_dict['dino_embeddings'])-3)
         end_index = np.random.randint(start_index+3, len(episode_dict['dino_embeddings']))
         dino_embeddings = self.padding_sequence(episode_dict['dino_embeddings'][start_index:end_index])
         minlm_task_embedding = episode_dict['minlm_task_embedding']
@@ -73,7 +74,32 @@ class MultiStageDataset(dataset.Dataset):
             'stage': stage,
             'subtask_progress': subtask_progress,
         }
-        
+
+    def sample_rewinded_video_from_episode(self, episode_dict):
+        """
+        Sample from a given episode to a fixed sequence length, but randomly rewind the video.
+        """
+        start_index = np.random.randint(0, len(episode_dict['dino_embeddings'])-3)
+        end_index = np.random.randint(start_index+3, len(episode_dict['dino_embeddings']))
+        split_index = np.random.randint(start_index, end_index-2)
+        dino_embeddings = np.concatenate((episode_dict['dino_embeddings'][start_index:end_index], np.asarray(episode_dict['dino_embeddings'])[end_index-2:split_index:-1]), 0)
+        dino_embeddings = self.padding_sequence(dino_embeddings)
+        minlm_task_embedding = episode_dict['minlm_task_embedding']
+        sampled_progress = np.arange(end_index - start_index) / (len(episode_dict['dino_embeddings']) - start_index)
+        progress = np.concatenate((sampled_progress, sampled_progress[-2:split_index-start_index:-1]), 0)
+        progress = self.padding_sequence(progress)
+        stage = np.concatenate((episode_dict['stage'][start_index:end_index], np.asarray(episode_dict['stage'])[end_index-2:split_index:-1]), 0)
+        stage = self.padding_sequence(stage)
+        subtask_progress = np.concatenate((episode_dict['subtask_progress'][start_index:end_index], np.asarray(episode_dict['subtask_progress'])[end_index-2:split_index:-1]), 0)
+        subtask_progress = self.padding_sequence(subtask_progress)
+        return {
+            'dino_embeddings': dino_embeddings,
+            'minlm_task_embedding': np.asarray(minlm_task_embedding),
+            'progress': progress,
+            'stage': stage,
+            'subtask_progress': subtask_progress,
+        }
+
     def padding_sequence(self, sequence):
         """
         Pad a sequence to a fixed length.
@@ -97,6 +123,9 @@ class MultiStageDataset(dataset.Dataset):
         """
         episode_id = np.sum([1 for i in self.cumulative_timestep if i <= idx]) - 1
         output_dict = self.h5_file[self.episode_keys[episode_id]]
+        if self.video_rewind:
+            if np.random.random() < 0.8:
+                return dict_apply(self.sample_rewinded_video_from_episode(output_dict), torch.from_numpy)
         return dict_apply(self.sample_from_episode(output_dict), torch.from_numpy)
 
 
@@ -104,7 +133,8 @@ if __name__ == "__main__":
     dataset = MultiStageDataset(
         dataset_path="/data/yuwenye/reward_modeling/data/sarm/1113_kitchen_embeddings.hdf5",
         num_stages=7,
-        max_seq_len=32
+        max_seq_len=32,
+        video_rewind=True
     )
     print(len(dataset))
     print(dataset[0])

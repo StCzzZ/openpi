@@ -15,8 +15,9 @@ uv run reward_model/train_reward.py \
 --num_epochs 100 \
 --num_workers 4 \
 --clip-grad \
+--video-rewind \
 --device cuda \
 --eval_every 10 \
 --save_every 20 \
 --wandb_project reward_model \
---exp_name simple_sarm
+--exp_name rewind_sarm
