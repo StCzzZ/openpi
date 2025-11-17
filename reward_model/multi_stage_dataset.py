@@ -49,6 +49,8 @@ class MultiStageDataset(dataset.Dataset):
             for stage in np.unique(stage_labels):
                 self.stage_prior[stage] += np.sum(stage_labels == stage)
         self.stage_prior /= np.sum(self.stage_prior)
+        self.cumulative_stage_prior = np.cumsum(self.stage_prior)
+        self.cumulative_stage_prior = np.concatenate((np.array([0.,]), self.cumulative_stage_prior[:-1]))
 
     def sample_from_episode(self, episode_dict):
         """

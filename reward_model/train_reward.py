@@ -126,7 +126,7 @@ def main(args: Args):
 
             print(f"Epoch {epoch+1} completed; Validation loss: {val_loss / len(val_loader)}")
 
-        if epoch % args.save_every == 0:
+        if epoch % args.save_every == 0 or epoch == args.num_epochs - 1:
             save_dict = {
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
