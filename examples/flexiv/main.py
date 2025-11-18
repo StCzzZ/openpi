@@ -51,7 +51,7 @@ class Args:
     # Utils
     #################################################################################################################
     output_dir: str = "data/flexiv/rollout_data"  # Path to save rollout data
-    output_name: str = "1111_fold_towel_twice_rel_euler"
+    output_name: str = "1117_kitchen_100_rollout"
     seed: int = 7  # Random Seed (for reproducibility)
 
 
@@ -61,7 +61,7 @@ def main(args: Args) -> None:
     np.random.seed(args.seed)
 
     # Task description
-    task_description = "Fold the towel twice by grabbing its corners"
+    task_description = "Put the items in the pot."
     
     # Initialize robot environment
     if isinstance(args.resize_size, int):
@@ -116,7 +116,7 @@ def main(args: Args) -> None:
             random_init_pose[2] = max(random_init_pose[2], 0.15)
         
         robot_state = robot_env.reset_robot(args.random_init, random_init_pose)
-        time.sleep(5)
+        time.sleep(10)
         action_plan = collections.deque()
         tcp_rot_history = [CANONICAL_EULER_ANGLES] # to prevent gimbal lock problem of euler angles in the observation space
         t = 0
@@ -198,4 +198,4 @@ def main(args: Args) -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    tyro.cli(main)
+    main(tyro.cli(Args))
