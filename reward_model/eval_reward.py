@@ -46,7 +46,7 @@ def _build_sliding_windows(
     max_seq_len: int,
 ) -> np.ndarray:
     padded_sequences = [
-        dataset.padding_sequence(embeddings[:-i]) for i in range(max_seq_len - 1, 0, -1)
+        dataset.padding_sequence(embeddings[:-i]) for i in range(embeddings.shape[0] - 1, 0, -1)
     ]
     padded_sequences.append(dataset.padding_sequence(embeddings))
     return np.stack(padded_sequences, axis=0)
@@ -129,9 +129,15 @@ def main(args: Args) -> None:
                 (padded_visual_embeddings.shape[0], train_config.max_seq_len),
                 dtype=bool,
             )
+            offset_mask = np.zeros(
+                (padded_visual_embeddings.shape[0], padded_visual_embeddings.shape[0]),
+                dtype=bool,
+            )
             for idx in range(padded_visual_embeddings.shape[0]):
                 pred_mask[idx, min(idx, train_config.max_seq_len - 1)] = 1
+                offset_mask[idx, max(idx - train_config.max_seq_len + 1, 0)] = 1
             pred_mask_tensor = torch.from_numpy(pred_mask).to(device)
+            offset_mask_tensor = torch.from_numpy(offset_mask).to(device)
 
             with torch.no_grad():
                 stage_preds, progress_preds = reward_model(padded_visual_embeddings, language_tensor)
@@ -146,7 +152,10 @@ def main(args: Args) -> None:
                     total_progress_pred = prior_progress + progress_preds * stage_prior[stage_preds]
                 else:
                     progress_preds = progress_preds.squeeze(-1)
-                    total_progress_pred = progress_preds[pred_mask_tensor]
+                    total_progress_pred = progress_preds[pred_mask_tensor] # (num_frames, )
+                    offset_progress_pred = total_progress_pred.unsqueeze(0).repeat(padded_visual_embeddings.shape[0], 1)
+                    total_progress_pred = offset_progress_pred[offset_mask_tensor] \
+                        + (1. - offset_progress_pred[offset_mask_tensor]) * total_progress_pred # (num_frames, )
 
             reward_sequence = total_progress_pred.detach().cpu().numpy()
             episode_output_path = output_dir / f"{key}.mp4"
