@@ -16,7 +16,7 @@ from openpi.shared import array_typing as at
 logger = logging.getLogger("openpi")
 
 
-def make_attn_mask(input_mask, mask_ar, action_value_mask=None):
+def make_attn_mask(input_mask, mask_ar):
     """Adapted from big_vision.
 
     Tokens can attend to valid inputs tokens which have a cumulative mask_ar
@@ -41,14 +41,26 @@ def make_attn_mask(input_mask, mask_ar, action_value_mask=None):
     cumsum = jnp.cumsum(mask_ar, axis=1)
     attn_mask = cumsum[:, None, :] <= cumsum[:, :, None]
     valid_mask = input_mask[:, None, :] * input_mask[:, :, None]
-    # Value head included in the attention mask
-    if action_value_mask is not None:
-        action_value_mask = jnp.broadcast_to(action_value_mask, input_mask.shape)
-        action_value_cumsum = jnp.cumsum(action_value_mask, axis=1)
-        action_value_attn_mask = action_value_cumsum[:, None, :] <= action_value_cumsum[:, :, None]
-        return jnp.logical_and(jnp.logical_and(attn_mask, valid_mask), action_value_attn_mask)
-    else:
-        return jnp.logical_and(attn_mask, valid_mask)
+    return jnp.logical_and(attn_mask, valid_mask)
+
+
+def _make_value_action_block_mask(
+    prefix_mask: at.Bool[at.Array, "b p"],
+    value_mask: at.Bool[at.Array, "b v"],
+    action_mask: at.Bool[at.Array, "b s"],
+) -> at.Bool[at.Array, "b _t _t"]:
+    """Builds a mask that forbids value/action tokens from attending to each other."""
+    prefix_ids = jnp.zeros_like(prefix_mask, dtype=jnp.int32)
+    value_ids = jnp.ones_like(value_mask, dtype=jnp.int32)
+    action_ids = jnp.full_like(action_mask, 2, dtype=jnp.int32)
+    block_ids = jnp.concatenate([prefix_ids, value_ids, action_ids], axis=1)
+    value_queries = block_ids[:, :, None] == 1
+    action_queries = block_ids[:, :, None] == 2
+    value_keys = block_ids[:, None, :] == 1
+    action_keys = block_ids[:, None, :] == 2
+    value_to_action_mask = jnp.logical_not(value_queries & action_keys)
+    action_to_value_mask = jnp.logical_not(action_queries & value_keys)
+    return jnp.logical_and(value_to_action_mask, action_to_value_mask)
 
 
 @at.typecheck
@@ -75,17 +87,19 @@ class Pi0Value(_model.BaseModel):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
         paligemma_config = _gemma.get_config(config.paligemma_variant)
-        value_config = _gemma.get_config(config.value_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
+        if config.value_variant != config.action_expert_variant:
+            raise ValueError("Pi0Value requires `value_variant` to match `action_expert_variant` when sharing experts.")
+        value_config = action_expert_config
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
             _gemma.Module(
-                configs=[paligemma_config, value_config, action_expert_config],
+                configs=[paligemma_config, action_expert_config],
                 embed_dtype=config.dtype,
                 adarms=config.pi05,
             )
         )
-        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, False, True] if config.pi05 else [False, False, False])
+        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True] if config.pi05 else [False, False])
         img = nnx_bridge.ToNNX(
             _siglip.Module(
                 num_classes=paligemma_config.width,
@@ -220,22 +234,22 @@ class Pi0Value(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        # one big forward pass of prefix + suffix at once
+        # one big forward pass of prefix + value + suffix at once (value and action experts share weights)
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         value_tokens, value_mask, value_ar_mask = self.embed_value_prefix(observation)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-        input_mask = jnp.concatenate([prefix_mask, value_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, value_ar_mask, suffix_ar_mask], axis=0)
-        # Reverse mask for action-value segregation
-        suffix_len = suffix_ar_mask.shape[0]
-        action_value_mask = jnp.zeros(ar_mask.shape, dtype=jnp.int32)
-        action_value_mask = action_value_mask.at[-suffix_len].set(-1)
-        # Full attention mask (value tokens and action tokens are fully segregated)
-        attn_mask = make_attn_mask(input_mask, ar_mask, action_value_mask)
+        expert_tokens = jnp.concatenate([value_tokens, suffix_tokens], axis=1)
+        expert_mask = jnp.concatenate([value_mask, suffix_mask], axis=1)
+        expert_ar_mask = jnp.concatenate([value_ar_mask, suffix_ar_mask], axis=0)
+        input_mask = jnp.concatenate([prefix_mask, expert_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, expert_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        attn_mask = jnp.logical_and(attn_mask, _make_value_action_block_mask(prefix_mask, value_mask, suffix_mask))
         positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, value_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, value_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, None, adarms_cond]
+        (prefix_out, expert_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, expert_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
+        value_out, suffix_out = jnp.split(expert_out, [value_tokens.shape[1]], axis=1)
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         value_pred = self.value_out_proj(value_out)
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
@@ -257,15 +271,16 @@ class Pi0Value(_model.BaseModel):
         if noise is None:
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
-        # first fill KV cache with a forward pass of the prefix
+        # first fill KV cache with a forward pass of the prefix and value tokens
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         value_tokens, value_mask, value_ar_mask = self.embed_value_prefix(observation)
-        value_attn_mask = make_attn_mask(value_mask, value_ar_mask)
-        prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=value_tokens.shape[1])
-        full_attn_mask = jnp.concatenate([prefix_attn_mask, value_attn_mask], axis=-1)
-        positions = jnp.cumsum(jnp.concatenate([prefix_mask, value_mask], axis=1), axis=1) - 1
-        (_, value_pred_out, _), kv_cache = self.PaliGemma.llm([prefix_tokens, value_tokens, None], mask=full_attn_mask, positions=positions)
+        prefix_value_mask = jnp.concatenate([prefix_mask, value_mask], axis=1)
+        prefix_value_ar_mask = jnp.concatenate([prefix_ar_mask, value_ar_mask], axis=0)
+        prefix_value_attn_mask = make_attn_mask(prefix_value_mask, prefix_value_ar_mask)
+        positions = jnp.cumsum(prefix_value_mask, axis=1) - 1
+        (_, value_pred_out), kv_cache = self.PaliGemma.llm(
+            [prefix_tokens, value_tokens], mask=prefix_value_attn_mask, positions=positions
+        )
         # Predict the value at the current timestep
         # value_pred = self.value_out_proj(value_pred_out)
 
@@ -290,17 +305,17 @@ class Pi0Value(_model.BaseModel):
                 prefix_tokens.shape[1] + value_tokens.shape[1] + suffix_tokens.shape[1],
             )
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
-            positions = jnp.sum(jnp.concatenate([prefix_mask, value_mask], axis=1), axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            positions = jnp.sum(prefix_value_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
-            (prefix_out, value_out, suffix_out), _ = self.PaliGemma.llm(
-                [None, None, suffix_tokens],
+            (prefix_out, expert_out), _ = self.PaliGemma.llm(
+                [None, suffix_tokens],
                 mask=full_attn_mask,
                 positions=positions,
                 kv_cache=kv_cache,
-                adarms_cond=[None, None, adarms_cond],
+                adarms_cond=[None, adarms_cond],
             )
-            assert prefix_out is None and value_out is not None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            assert prefix_out is None and expert_out is not None
+            v_t = self.action_out_proj(expert_out[:, -self.action_horizon :])
 
             return x_t + dt * v_t, time + dt
 

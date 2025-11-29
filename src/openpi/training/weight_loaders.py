@@ -1,6 +1,4 @@
-import collections
 import dataclasses
-import logging
 import re
 from typing import Protocol, runtime_checkable
 
@@ -10,8 +8,6 @@ import numpy as np
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
 import openpi.shared.download as download
-
-logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -107,100 +103,11 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
 
 @dataclasses.dataclass(frozen=True)
 class Pi05ValueWeightLoader(WeightLoader):
-    """Loads pi05 checkpoints while adding an additional value expert.
-
-    This loader:
-      * loads the original pi05 checkpoint,
-      * remaps the old action expert (expert #1) to expert #2,
-      * optionally initializes the new value expert (#1) from an external loader,
-        defaulting to the official PaliGemma checkpoint.
-    """
+    """Loads pi05 checkpoints and initializes missing value-specific parameters."""
 
     base_params_path: str
-    value_weight_loader: WeightLoader | None = dataclasses.field(default_factory=PaliGemmaWeightLoader)
 
     def load(self, params: at.Params) -> at.Params:
-        flat_meta = flax.traverse_util.flatten_dict(params, sep="/")
-        flat_result = dict(flat_meta)
-
         base_params = _model.restore_params(download.maybe_download(self.base_params_path), restore_type=np.ndarray)
-        flat_base = flax.traverse_util.flatten_dict(base_params, sep="/")
-
-        flat_value: dict[str, np.ndarray | at.Array] = {}
-        if self.value_weight_loader is not None:
-            value_params = self.value_weight_loader.load(params)
-            flat_value = flax.traverse_util.flatten_dict(value_params, sep="/")
-
-        value_key_map = _build_value_key_map(flat_meta.keys())
-        action_key_map = _build_action_key_map(flat_meta.keys())
-
-        def assign(target_key: str, source_value: np.ndarray):
-            if target_key not in flat_result:
-                return
-            if not isinstance(source_value, np.ndarray):
-                return
-            reference = flat_meta[target_key]
-            target_shape = getattr(reference, "shape", None)
-            if target_shape is not None and source_value.shape != target_shape:
-                logger.warning(
-                    "Skipping %s due to shape mismatch (loaded %s vs expected %s).",
-                    target_key,
-                    source_value.shape,
-                    target_shape,
-                )
-                return
-            target_dtype = getattr(reference, "dtype", None)
-            if target_dtype is not None and source_value.dtype != target_dtype:
-                source_value = source_value.astype(target_dtype, copy=False)
-            flat_result[target_key] = source_value
-
-        for key, value in flat_base.items():
-            if key in flat_result:
-                assign(key, value)
-            if key in action_key_map:
-                assign(action_key_map[key], value)
-
-        if value_key_map:
-            for base_key, target_keys in value_key_map.items():
-                source_value = flat_value.get(base_key)
-                if source_value is None:
-                    source_value = flat_base.get(base_key)
-                if not isinstance(source_value, np.ndarray):
-                    continue
-                for target_key in target_keys:
-                    assign(target_key, source_value)
-
-        return flax.traverse_util.unflatten_dict(flat_result, sep="/")
-
-
-def _build_value_key_map(keys: collections.abc.Iterable[str]) -> dict[str, list[str]]:
-    mapping: dict[str, list[str]] = collections.defaultdict(list)
-    for key in keys:
-        normalized, replaced = _replace_expert_suffix(key, "_1", "")
-        if replaced:
-            mapping[normalized].append(key)
-    return mapping
-
-
-def _build_action_key_map(keys: collections.abc.Iterable[str]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for key in keys:
-        normalized, replaced = _replace_expert_suffix(key, "_2", "_1")
-        if replaced:
-            mapping[normalized] = key
-    return mapping
-
-
-def _replace_expert_suffix(key: str, old_suffix: str, new_suffix: str) -> tuple[str, bool]:
-    segments = key.split("/")
-    try:
-        llm_idx = segments.index("llm")
-    except ValueError:
-        return key, False
-    replaced = False
-    for idx in range(llm_idx + 1, len(segments)):
-        segment = segments[idx]
-        if segment.endswith(old_suffix):
-            segments[idx] = segment[: -len(old_suffix)] + new_suffix
-            replaced = True
-    return "/".join(segments), replaced
+        # The pi05 checkpoint does not contain the new value tokens/head, so keep their initialization from `params`.
+        return _merge_params(base_params, params, missing_regex=".*")
