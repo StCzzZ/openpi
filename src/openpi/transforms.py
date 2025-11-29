@@ -103,6 +103,30 @@ class RepackTransform(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class EnsureValueDim(DataTransformFn):
+    """Ensure that scalar value targets have an explicit singleton dimension."""
+
+    axis: int = -1
+
+    def __call__(self, data: DataDict) -> DataDict:
+        value = data.get("value")
+        if value is None:
+            return data
+
+        array = np.asarray(value)
+        if array.ndim == 0:
+            array = np.expand_dims(array, axis=0)
+        elif array.shape[-1] != 1:
+            axis = self.axis
+            if axis < 0:
+                axis = array.ndim + axis + 1
+            array = np.expand_dims(array, axis=axis)
+
+        data["value"] = array
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class InjectDefaultPrompt(DataTransformFn):
     prompt: str | None
 

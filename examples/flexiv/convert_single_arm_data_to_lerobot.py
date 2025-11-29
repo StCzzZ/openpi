@@ -7,7 +7,7 @@ import h5py
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-REPO_NAME = "Virlus/flexiv_fold_towel_twice_euler_angles"
+REPO_NAME = "Virlus/test"
 
 def main(data_dir: str, *, push_to_hub: bool = False):
     # Clean up any existing dataset in the output directory
@@ -43,22 +43,30 @@ def main(data_dir: str, *, push_to_hub: bool = False):
                 "shape": (7,),
                 "names": ["actions"],
             },
+            "value": {
+                "dtype": "float32",
+                "shape": (1,),
+                "names": ["value"],
+            }
         },
         image_writer_threads=10,
         image_writer_processes=5,
     )
     
-    with h5py.File(data_dir, 'r') as f:
+    with h5py.File(data_dir, "r") as f:
         for key in f:
             episode = f[key]
-            for step in range(episode["action"].shape[0]):
+            num_steps = episode["action"].shape[0]
+            values = np.arange(-num_steps + 1, 1, dtype=np.float32)[:, None]
+            for step in range(num_steps):
                 dataset.add_frame(
                     {
-                        "image": episode['side_cam'][step],
-                        "wrist_image": episode['wrist_cam'][step],
-                        "state": episode['tcp_pose'][step].astype(np.float32),
-                        "actions": episode['action'][step].astype(np.float32),
-                        "task": 'fold the towel twice by grabbing its corners',
+                        "image": episode["side_cam"][step],
+                        "wrist_image": episode["wrist_cam"][step],
+                        "state": episode["tcp_pose"][step].astype(np.float32),
+                        "actions": episode["action"][step].astype(np.float32),
+                        "value": values[step],
+                        "task": "Put the items in the pot",
                     }
                 )
             dataset.save_episode()

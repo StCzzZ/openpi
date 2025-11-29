@@ -222,7 +222,7 @@ class Pi0Value(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
@@ -252,7 +252,9 @@ class Pi0Value(_model.BaseModel):
         value_out, suffix_out = jnp.split(expert_out, [value_tokens.shape[1]], axis=1)
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         value_pred = self.value_out_proj(value_out)
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        value_loss = jnp.mean(jnp.square(value_pred - value[:, None, :]), axis=-1)
+        action_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        return action_loss + value_loss
 
     @override
     def sample_actions(
@@ -262,7 +264,7 @@ class Pi0Value(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
-    ) -> _model.Actions:
+    ) -> tuple[_model.Actions, _model.Values]:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -281,8 +283,8 @@ class Pi0Value(_model.BaseModel):
         (_, value_pred_out), kv_cache = self.PaliGemma.llm(
             [prefix_tokens, value_tokens], mask=prefix_value_attn_mask, positions=positions
         )
-        # Predict the value at the current timestep
-        # value_pred = self.value_out_proj(value_pred_out)
+        value_pred = self.value_out_proj(value_pred_out)
+        value_pred = value_pred[:, -1, :]
 
         def step(carry):
             x_t, time = carry
@@ -325,4 +327,4 @@ class Pi0Value(_model.BaseModel):
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0
+        return x_0, value_pred

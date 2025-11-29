@@ -140,7 +140,7 @@ class Observation(Generic[ArrayT]):
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
 Actions = at.Float[ArrayT, "*b ah ad"]
-
+Values = at.Float[ArrayT, "*b 1"]
 
 def preprocess_observation(
     rng: at.KeyArrayLike | None,

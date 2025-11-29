@@ -141,13 +141,18 @@ class Pi0ValueConfig(_model.BaseModelConfig):
         return _model.ModelType.PI0_VALUE
 
     @override
+    def fake_obs(self, batch_size: int = 1) -> _model.Observation:
+        observation_spec, _, _ = self.inputs_spec(batch_size=batch_size)
+        return jax.tree.map(lambda x: jnp.ones(x.shape, x.dtype), observation_spec)
+
+    @override
     def create(self, rng: at.KeyArrayLike) -> "Pi0":
         from openpi.models.pi0_value import Pi0Value
 
         return Pi0Value(self, rngs=nnx.Rngs(rng))
 
     @override
-    def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
+    def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions, _model.Values]:
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
 
@@ -168,8 +173,9 @@ class Pi0ValueConfig(_model.BaseModelConfig):
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
+        value_spec = jax.ShapeDtypeStruct([batch_size, 1], jnp.float32)
 
-        return observation_spec, action_spec
+        return observation_spec, action_spec, value_spec
 
     def get_freeze_filter(self) -> nnx.filterlib.Filter:
         """Returns the freeze filter based on the model config."""

@@ -89,9 +89,17 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        model_output = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        if isinstance(model_output, tuple):
+            actions, value = model_output
+        else:
+            actions = model_output
+            value = None
+
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": actions,
+            "value": value,
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
@@ -125,9 +133,16 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        model_output = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        if isinstance(model_output, tuple):
+            actions, value = model_output
+        else:
+            actions = model_output
+            value = None
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": actions,
+            "value": value,
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
