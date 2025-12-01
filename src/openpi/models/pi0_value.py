@@ -309,7 +309,7 @@ class Pi0Value(_model.BaseModel):
         )
         value_pred = self.value_out_proj(value_pred_out)
         if self.discrete_value:
-            value_pred = nnx.log_softmax(value_pred, axis=-1)
+            value_pred = nnx.softmax(value_pred, axis=-1)
             value_pred = value_pred[:, -1, :]
         else:
             value_pred = nnx.sigmoid(value_pred)
