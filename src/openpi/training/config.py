@@ -982,12 +982,12 @@ _CONFIGS = [
     ##########################################################
     TrainConfig(
         name="pi05_flexiv_value",
-        model=pi0_config.Pi0ValueConfig(pi05=True, action_horizon=10, discrete_state_input=False, discrete_value=True, n_bins=256),
+        model=pi0_config.Pi0ValueConfig(pi05=True, action_horizon=10, discrete_state_input=False, discrete_value=False, n_bins=256),
         data=LeRobotMyDataValueConfig(
             repo_id="Virlus/kitchen_100_value",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
-            extra_value_transform=True,
+            extra_value_transform=False,
             n_bins=256,
         ),
         batch_size=64,
