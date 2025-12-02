@@ -112,7 +112,7 @@ class ModelTransformFactory(GroupFactory):
 
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
-            case _model.ModelType.PI0 | _model.ModelType.PI0_VALUE:
+            case _model.ModelType.PI0 | _model.ModelType.PI0_PREFIX_VALUE | _model.ModelType.PI0_SUFFIX_VALUE:
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
@@ -123,9 +123,10 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
-            case _model.ModelType.PI05 | _model.ModelType.PI05_VALUE:
+            case _model.ModelType.PI05 | _model.ModelType.PI05_PREFIX_VALUE | _model.ModelType.PI05_SUFFIX_VALUE:
                 assert isinstance(model_config, pi0_config.Pi0Config) or \
-                    isinstance(model_config, pi0_config.Pi0ValueConfig)
+                    isinstance(model_config, pi0_config.Pi0SuffixValueConfig) or \
+                    isinstance(model_config, pi0_config.Pi0PrefixValueConfig)
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
@@ -978,11 +979,38 @@ _CONFIGS = [
         num_train_steps=40_000,
     ),
     ##########################################################
-    # Post-training with self-generated value estimation
+    # Post-training with self-generated value estimation 
     ##########################################################
+    # Value token attached to the action tokens (belongs to the action expert)
     TrainConfig(
-        name="pi05_flexiv_value",
-        model=pi0_config.Pi0ValueConfig(pi05=True, action_horizon=10, discrete_state_input=False, discrete_value=False, n_bins=256),
+        name="pi05_flexiv_suffix_value",
+        model=pi0_config.Pi0SuffixValueConfig(pi05=True, action_horizon=10, discrete_state_input=False, discrete_value=False, n_bins=256),
+        data=LeRobotMyDataValueConfig(
+            repo_id="Virlus/kitchen_100_value",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+            extra_value_transform=False,
+            n_bins=256,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.Pi05ValueWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=40_000,
+    ),
+    # Value token separated from the action tokens (belongs to a new PaliGemma model, a.k.a value expert)
+    # TODO: pending due to large memory comsumption
+    # Value token appended to the observation tokens (belongs to the prefix model)
+    TrainConfig(
+        name="pi05_flexiv_prefix_value",
+        model=pi0_config.Pi0PrefixValueConfig(pi05=True, action_horizon=10, discrete_state_input=False, discrete_value=False, n_bins=256),
         data=LeRobotMyDataValueConfig(
             repo_id="Virlus/kitchen_100_value",
             base_config=DataConfig(prompt_from_task=True),
