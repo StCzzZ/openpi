@@ -323,7 +323,7 @@ class Pi0PrefixValueConfig(_model.BaseModelConfig):
 class Pi0ValueExpertConfig(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
-    value_variant: _gemma.Variant = "gemma_300m_lora"
+    value_variant: _gemma.Variant = "gemma_300m"
     action_expert_variant: _gemma.Variant = "gemma_300m"
 
     # Set the model specific defaults.
