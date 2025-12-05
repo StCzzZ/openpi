@@ -62,6 +62,8 @@ class WebsocketPolicyServer:
                 infer_time = time.monotonic()
                 action = self._policy.infer_batch(obs) if self._is_batched else self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
+                if "value" in action:
+                    action["value"] = action["value"].astype(action["actions"].dtype)
 
                 action["server_timing"] = {
                     "infer_ms": infer_time * 1000,

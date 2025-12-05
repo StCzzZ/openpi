@@ -1,5 +1,4 @@
 import dataclasses
-import logging
 import re
 from typing import Protocol, runtime_checkable
 
@@ -9,8 +8,6 @@ import numpy as np
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
 import openpi.shared.download as download
-
-logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -102,3 +99,54 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
             result[k] = flat_ref[k]
 
     return flax.traverse_util.unflatten_dict(result, sep="/")
+
+
+@dataclasses.dataclass(frozen=True)
+class Pi05ValueWeightLoader(WeightLoader):
+    """Loads pi05 checkpoints and initializes missing value-specific parameters."""
+
+    base_params_path: str
+
+    def load(self, params: at.Params) -> at.Params:
+        base_params = _model.restore_params(download.maybe_download(self.base_params_path), restore_type=np.ndarray)
+        # The pi05 checkpoint does not contain the new value tokens/head, so keep their initialization from `params`.
+        return _merge_params(base_params, params, missing_regex=".*lora.*")
+
+
+@dataclasses.dataclass(frozen=True)
+class Pi05ValueExpertWeightLoader(WeightLoader):
+    """Loads pi05 checkpoints and initializes missing value-specific parameters."""
+
+    base_params_path: str
+
+    def load(self, params: at.Params) -> at.Params:
+        base_params = _model.restore_params(download.maybe_download(self.base_params_path), restore_type=np.ndarray)
+
+        # Map SigLip and ActionExpert weights to ValueExpert
+        flat_base = flax.traverse_util.flatten_dict(base_params, sep="/")
+        new_params = {}
+        for k, v in flat_base.items():
+            # Copy SigLip weights
+            if k.startswith("PaliGemma/img/"):
+                new_key = k.replace("PaliGemma/img/", "ValuePaliGemma/img/")
+                # Don't load the head (projector) if the shapes don't match
+                if "head" in new_key:
+                    continue
+                new_params[new_key] = v
+            # Copy ActionExpert (expert 1) weights to ValueExpert LLM
+            elif k.startswith("PaliGemma/llm/"):
+                parts = k.split("/")
+                # Only process keys belonging to expert 1 (indicated by _1 suffix in names)
+                if any(p.endswith("_1") and not p.isdigit() for p in parts):
+                    # Remove _1 suffix from all parts
+                    new_parts = [p[:-2] if (p.endswith("_1") and not p.isdigit()) else p for p in parts]
+                    new_key = "/".join(new_parts).replace("PaliGemma/llm/", "ValuePaliGemma/llm/")
+                    new_params[new_key] = v
+
+        value_expert_params = flax.traverse_util.unflatten_dict(new_params, sep="/")
+
+        # The pi05 checkpoint does not contain the new value tokens/head, so keep their initialization from `params`.
+        # First merge base_params, keeping all other params initialized (regex=".*")
+        params = _merge_params(base_params, params, missing_regex=".*")
+        # Then merge extracted value expert params, again keeping all other params initialized
+        return _merge_params(value_expert_params, params, missing_regex=".*")

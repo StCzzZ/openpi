@@ -103,6 +103,9 @@ class MyInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
+        if "value" in data:
+            inputs["value"] = data["value"]
+
         return inputs
 
 
@@ -120,4 +123,9 @@ class MyOutputs(transforms.DataTransformFn):
         # dimension, we need to now parse out the correct number of actions in the return dict.
         # For Libero, we only return the first 7 actions (since the rest is padding).
         # For your own dataset, replace `7` with the action dimension of your dataset.
-        return {"actions": np.asarray(data["actions"][..., :7])}
+        outputs = {
+            "actions": np.asarray(data["actions"][..., :7]),
+        }
+        if "value" in data and data["value"] is not None:
+            outputs["value"] = np.asarray(data["value"][..., 0]) # (b, )
+        return outputs

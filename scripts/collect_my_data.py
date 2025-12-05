@@ -1,15 +1,24 @@
 import time
 import os
 import numpy as np
-import argparse
+from dataclasses import dataclass
+from typing import List
 from scipy.spatial.transform import Rotation as R
 import h5py
+import tyro
 
 from hardware.robot_env import RobotEnv
-from hardware.my_device.macros import CAM_SERIAL
+from hardware.my_device.macros import CAM_SERIAL, CANONICAL_EULER_ANGLES
 
 
-def main(args):
+@dataclass
+class Args:
+    save_path: str
+    resolution: List[int]
+    fps: float = 10.0
+
+
+def main(args: Args):
     robot_env = RobotEnv(camera_serial=CAM_SERIAL, img_shape=[3]+args.resolution, fps=args.fps)
     
     # Determine starting episode_id based on existing file
@@ -50,13 +59,14 @@ def main(args):
                 # Initialize at the beginning of the episode
                 if cnt == 0:
                     random_init_pose = robot_env.robot.init_pose + np.random.uniform(-0.1, 0.1, size=7)
+                    random_init_pose[2] = max(random_init_pose[2], 0.15)
                     robot_env.reset_robot(random_init=True, random_init_pose=random_init_pose)
                     cnt += 1
                     print("Episode start!")
                     continue
                 
-                wrist_cam.append(transition_data['wrist_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8))
-                side_cam.append(transition_data['side_img'].permute(1, 2, 0).cpu().numpy().astype(np.uint8))
+                wrist_cam.append(transition_data['wrist_img'])
+                side_cam.append(transition_data['side_img'])
                 tcp_pose.append(transition_data['tcp_pose'])
                 joint_pos.append(transition_data['joint_pos'])
                 action.append(transition_data['action'])
@@ -65,7 +75,7 @@ def main(args):
                 print('WARNING: discard the demo!')
                 robot_env.gripper.move(robot_env.gripper.max_width)
                 time.sleep(0.5)
-                return
+                continue
             
             episode = dict()
             episode['wrist_cam'] = np.stack(wrist_cam, axis=0)
@@ -73,6 +83,13 @@ def main(args):
             episode['tcp_pose'] = np.stack(tcp_pose, axis=0)
             episode['joint_pos'] = np.stack(joint_pos, axis=0)
             episode['action'] = np.stack(action, axis=0)
+            
+            # ================ Prevent Gimbal Lock problem of Euler angles =================
+            concat_tcp_r = np.concatenate((np.expand_dims(CANONICAL_EULER_ANGLES, axis=0), episode['tcp_pose'][:, 3:6]), axis=0)
+            unwrapped_tcp_r = np.unwrap(concat_tcp_r, axis=0)
+            episode['tcp_pose'] = np.concatenate((episode['tcp_pose'][:, :3], unwrapped_tcp_r[1:, :]), axis=-1)
+            # ================ Prevent Gimbal Lock problem of Euler angles =================
+
             # Create a group for this episode
             episode_group = f.create_group(f'episode_{episode_id}')
             # Save all key-value pairs for this episode
@@ -94,10 +111,5 @@ def main(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-save', '--save_path', type=str, required=True)
-    parser.add_argument('-res', '--resolution', nargs='+', type=int)
-    parser.add_argument('--fps', type=float, default=10.0)
-    args = parser.parse_args()
-    main(args)
+    main(tyro.cli(Args))
     

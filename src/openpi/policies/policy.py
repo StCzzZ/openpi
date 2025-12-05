@@ -89,9 +89,17 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        model_output = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        if isinstance(model_output, tuple):
+            actions, value = model_output
+        else:
+            actions = model_output
+            value = None
+
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": actions,
+            "value": value,
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
@@ -125,9 +133,16 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        model_output = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        if isinstance(model_output, tuple):
+            actions, value = model_output
+        else:
+            actions = model_output
+            value = None
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": actions,
+            "value": value,
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
@@ -140,6 +155,46 @@ class Policy(BasePolicy):
             "infer_ms": model_time * 1000,
         }
         return outputs
+
+    @override
+    def extract_visual_embeddings(
+        self,
+        obs: dict,
+        *,
+        batch_sharding: jax.sharding.Sharding | None = None,
+    ) -> np.ndarray:
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs = self._input_transform(inputs)
+        if not self._is_pytorch_model:
+            def _to_device_array(value):
+                if isinstance(value, jax.Array):
+                    return value
+                if isinstance(value, np.ndarray):
+                    if (
+                        batch_sharding is not None
+                        and value.ndim >= 1
+                        and (
+                            np.issubdtype(value.dtype, np.number)
+                            or np.issubdtype(value.dtype, np.bool_)
+                        )
+                    ):
+                        try:
+                            return jax.device_put(value, batch_sharding)
+                        except ValueError:
+                            # Fallback to default device placement if sharding is incompatible
+                            pass
+                    return jnp.asarray(value)
+                return value
+
+            inputs = jax.tree.map(_to_device_array, inputs)
+        else:
+            # Convert inputs to PyTorch tensors and move to correct device
+            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device), inputs)
+
+        observation = _model.Observation.from_dict(inputs)
+        visual_embeddings = self._model.extract_visual_embeddings(observation)
+        visual_embeddings = np.asarray(visual_embeddings)
+        return visual_embeddings
 
     @property
     def metadata(self) -> dict[str, Any]:

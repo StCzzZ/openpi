@@ -33,7 +33,12 @@ class ModelType(enum.Enum):
     PI0 = "pi0"
     PI0_FAST = "pi0_fast"
     PI05 = "pi05"
-
+    PI0_SUFFIX_VALUE = "pi0_suffix_value"
+    PI0_PREFIX_VALUE = "pi0_prefix_value"
+    PI0_VALUE_EXPERT = "pi0_value_expert"
+    PI05_SUFFIX_VALUE = "pi05_suffix_value"
+    PI05_PREFIX_VALUE = "pi05_prefix_value"
+    PI05_VALUE_EXPERT = "pi05_value_expert"
 
 # The model always expects these images
 IMAGE_KEYS = (
@@ -139,7 +144,7 @@ class Observation(Generic[ArrayT]):
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
 Actions = at.Float[ArrayT, "*b ah ad"]
-
+Values = at.Float[ArrayT, "*b 1"] | at.Float[ArrayT, "*b v"]
 
 def preprocess_observation(
     rng: at.KeyArrayLike | None,

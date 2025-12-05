@@ -112,7 +112,7 @@ class ModelTransformFactory(GroupFactory):
 
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
-            case _model.ModelType.PI0:
+            case _model.ModelType.PI0 | _model.ModelType.PI0_PREFIX_VALUE | _model.ModelType.PI0_SUFFIX_VALUE | _model.ModelType.PI0_VALUE_EXPERT:
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
@@ -123,8 +123,11 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
-            case _model.ModelType.PI05:
-                assert isinstance(model_config, pi0_config.Pi0Config)
+            case _model.ModelType.PI05 | _model.ModelType.PI05_PREFIX_VALUE | _model.ModelType.PI05_SUFFIX_VALUE | _model.ModelType.PI05_VALUE_EXPERT:
+                assert isinstance(model_config, pi0_config.Pi0Config) or \
+                    isinstance(model_config, pi0_config.Pi0SuffixValueConfig) or \
+                    isinstance(model_config, pi0_config.Pi0PrefixValueConfig) or \
+                    isinstance(model_config, pi0_config.Pi0ValueExpertConfig)
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
@@ -403,8 +406,8 @@ class LeRobotMyDataConfig(DataConfigFactory):
         # state in each action chunk). IF your data has ``absolute`` actions (e.g. target joint angles)
         # you can uncomment the following line to convert the actions to delta actions. The only exception
         # is for the gripper actions which are always absolute.
-        # In the example below, we would apply the delta conversion to the first 6 actions (joints) and
-        # leave the 7th action (gripper) unchanged, i.e. absolute.
+        # In the example below, we would apply the delta conversion to the first 9 actions (EEF pose) and
+        # leave the 10th action (gripper) unchanged, i.e. absolute.
         # In Libero, the raw actions in the dataset are already delta actions, so we *do not* need to
         # apply a separate delta conversion (that's why it's commented out). Choose whether to apply this
         # transform based on whether your dataset uses ``absolute`` or ``delta`` actions out of the box.
@@ -414,8 +417,96 @@ class LeRobotMyDataConfig(DataConfigFactory):
         if self.extra_delta_transform:
             delta_action_mask = _transforms.make_bool_mask(6, -1)
             data_transforms = data_transforms.push(
-                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                inputs=[_transforms.UnwrappedDeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        # You do not need to change anything here for your own dataset.
+        model_transforms = ModelTransformFactory()(model_config)
+
+        # We return all data transforms for training and inference. No need to change anything here.
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotMyDataValueConfig(DataConfigFactory):
+    """
+    This config is used to configure transforms that are applied at various parts of the data pipeline.
+    For your own dataset, you can copy this class and modify the transforms to match your dataset based on the
+    comments below.
+    """
+
+    extra_delta_transform: bool = False
+    extra_value_transform: bool = False
+    n_bins: int = 256
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # The repack transform is *only* applied to the data coming from the dataset,
+        # and *not* during inference. We can use it to make inputs from the dataset look
+        # as close as possible to those coming from the inference environment (e.g. match the keys).
+        # Below, we match the keys in the dataset (which we defined in the data conversion script) to
+        # the keys we use in our inference pipeline (defined in the inference script for libero).
+        # For your own dataset, first figure out what keys your environment passes to the policy server
+        # and then modify the mappings below so your dataset's keys get matched to those target keys.
+        # The repack transform simply remaps key names here.
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                        "value": "value",
+                    }
+                )
+            ]
+        )
+
+        # The data transforms are applied to the data coming from the dataset *and* during inference.
+        # Below, we define the transforms for data going into the model (``inputs``) and the transforms
+        # for data coming out of the model (``outputs``) (the latter is only used during inference).
+        # We defined these transforms in `libero_policy.py`. You can check the detailed comments there for
+        # how to modify the transforms to match your dataset. Once you created your own transforms, you can
+        # replace the transforms below with your own.
+        data_transforms = _transforms.Group(
+            inputs=[
+                _transforms.EnsureValueDim(),
+                my_policy.MyInputs(model_type=model_config.model_type)
+            ],
+            outputs=[my_policy.MyOutputs()],
+        )
+
+        # One additional data transform: pi0 models are trained on delta actions (relative to the first
+        # state in each action chunk). IF your data has ``absolute`` actions (e.g. target joint angles)
+        # you can uncomment the following line to convert the actions to delta actions. The only exception
+        # is for the gripper actions which are always absolute.
+        # In the example below, we would apply the delta conversion to the first 9 actions (EEF pose) and
+        # leave the 10th action (gripper) unchanged, i.e. absolute.
+        # In Libero, the raw actions in the dataset are already delta actions, so we *do not* need to
+        # apply a separate delta conversion (that's why it's commented out). Choose whether to apply this
+        # transform based on whether your dataset uses ``absolute`` or ``delta`` actions out of the box.
+
+        # LIBERO already represents actions as deltas, but we have some old Pi0 checkpoints that are trained with this
+        # extra delta transform.
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.UnwrappedDeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        if self.extra_value_transform:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DiscretizeValues(n_bins=self.n_bins)],
+                outputs=[_transforms.SerializeValues(n_bins=self.n_bins)],
             )
 
         # Model transforms include things like tokenizing the prompt and action targets
@@ -580,9 +671,9 @@ class TrainConfig:
     # How often (in steps) to log training metrics.
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
-    save_interval: int = 1000
+    save_interval: int = 5000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
-    keep_period: int | None = 5000
+    keep_period: int | None = 20000
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -743,6 +834,42 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
     TrainConfig(
+        # Change the name to reflect your model and dataset.
+        name="pi0_flexiv",
+        # Here you define the model config -- In this example we use pi0 as the model
+        # architecture and perform *full* finetuning. in the examples below we show how to modify
+        # this to perform *low-memory* (LORA) finetuning and use pi0-FAST as an alternative architecture.
+        model=pi0_config.Pi0Config(action_horizon=10),
+        # Here you define the dataset you are training on. In this example we use the Libero
+        # dataset. For your own dataset, you can change the repo_id to point to your dataset.
+        # Also modify the DataConfig to use the new config you made for your dataset above.
+        data=LeRobotMyDataConfig(
+            repo_id="Virlus/fold_towel_64",
+            base_config=DataConfig(
+                # This flag determines whether we load the prompt (i.e. the task instruction) from the
+                # ``task`` field in the LeRobot dataset. If set to True, the prompt will show up in
+                # a field called ``prompt`` in the input dict. The recommended setting is True.
+                prompt_from_task=True,
+            ),
+            extra_delta_transform=True,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        # Here you define which pre-trained checkpoint you want to load to initialize the model.
+        # This should match the model config you chose above -- i.e. in this case we use the pi0 base model.
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
+        # Check the base TrainConfig class for a full list of available hyperparameters.
+        num_train_steps=40_000,
+    ),
+    TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
         model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
@@ -828,12 +955,14 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+    ##########################################################
     # Fine-tuning on my own configs.
+    ##########################################################
     TrainConfig(
         name="pi05_flexiv",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotMyDataConfig(
-            repo_id="Virlus/flexiv_fold_towel_abs_action",
+            repo_id="Virlus/kitchen_100",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
         ),
@@ -848,7 +977,86 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
-        num_train_steps=30_000,
+        num_train_steps=40_000,
+    ),
+    ##########################################################
+    # Post-training with self-generated value estimation 
+    ##########################################################
+    ######### Value token attached to the action tokens (belongs to the action expert) ##########
+    TrainConfig(
+        name="pi05_flexiv_suffix_value",
+        model=pi0_config.Pi0SuffixValueConfig(pi05=True, action_horizon=10, discrete_state_input=False, discrete_value=False, n_bins=256),
+        data=LeRobotMyDataValueConfig(
+            repo_id="Virlus/kitchen_100_value",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+            extra_value_transform=False,
+            n_bins=256,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.Pi05ValueWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=40_000,
+    ),
+    ######### Value token separated from the action tokens (belongs to a new PaliGemma model, a.k.a. value expert) ##########
+    TrainConfig(
+        name="pi05_flexiv_value_expert",
+        model=pi0_config.Pi0ValueExpertConfig(pi05=True, action_horizon=10, discrete_state_input=False, \
+            discrete_value=False, n_bins=256),
+        data=LeRobotMyDataValueConfig(
+            repo_id="Virlus/kitchen_100_value",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+            extra_value_transform=False,
+            n_bins=256,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.Pi05ValueExpertWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=40_000,
+        freeze_filter=pi0_config.Pi0ValueExpertConfig(pi05=True, action_horizon=10, discrete_state_input=False, \
+            discrete_value=False, n_bins=256).get_freeze_filter(),
+        fsdp_devices=2,
+    ),
+    ######### Value token appended to the observation tokens (belongs to the prefix model) ##########
+    TrainConfig(
+        name="pi05_flexiv_prefix_value",
+        model=pi0_config.Pi0PrefixValueConfig(pi05=True, action_horizon=10, discrete_state_input=False, discrete_value=False, n_bins=256),
+        data=LeRobotMyDataValueConfig(
+            repo_id="Virlus/fold_towel_64_value",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+            extra_value_transform=False,
+            n_bins=256,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.Pi05ValueWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=40_000,
     ),
     #
     # Fine-tuning Aloha configs.

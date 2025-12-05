@@ -6,6 +6,7 @@ from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
 import flax.traverse_util as traverse_util
 import jax
 import numpy as np
+import torch
 from openpi_client import image_tools
 
 from openpi.models import tokenizer as _tokenizer
@@ -99,6 +100,88 @@ class RepackTransform(DataTransformFn):
     def __call__(self, data: DataDict) -> DataDict:
         flat_item = flatten_dict(data)
         return jax.tree.map(lambda k: flat_item[k], self.structure)
+
+
+@dataclasses.dataclass(frozen=True)
+class EnsureValueDim(DataTransformFn):
+    """Ensure that scalar value targets have an explicit singleton dimension."""
+
+    axis: int = -1
+
+    def __call__(self, data: DataDict) -> DataDict:
+        value = data.get("value")
+        if value is None:
+            return data
+
+        array = np.asarray(value)
+        if array.ndim == 0:
+            array = np.expand_dims(array, axis=0)
+        elif array.shape[-1] != 1:
+            axis = self.axis
+            if axis < 0:
+                axis = array.ndim + axis + 1
+            array = np.expand_dims(array, axis=axis)
+
+        data["value"] = array
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class DiscretizeValues(DataTransformFn):
+    """Discretize the values into n_bins discrete bins using bilinear interpolations."""
+    n_bins: int = 256
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "value" not in data:
+            return data
+        value = np.asarray(data["value"], dtype=np.float32)
+        if value.ndim == 0:
+            raise ValueError("Value must be a 1D array")
+        elif value.ndim == 1:
+            batch_shape = ()
+        else:
+            batch_shape = value.shape[:-1]
+
+        flat_values = value.reshape(-1)
+        bins = np.linspace(-1.0, 0.0, self.n_bins, dtype=np.float32)
+        distributions = np.zeros((flat_values.size, self.n_bins), dtype=np.float32)
+
+        lower_mask = flat_values <= bins[0]
+        upper_mask = flat_values >= bins[-1]
+        distributions[lower_mask, 0] = 1.0
+        distributions[upper_mask, -1] = 1.0
+
+        mid_mask = ~(lower_mask | upper_mask)
+        if np.any(mid_mask):
+            mid_values = flat_values[mid_mask]
+            right_idx = np.searchsorted(bins, mid_values, side="right")
+            left_idx = right_idx - 1
+            left_bin = bins[left_idx]
+            right_bin = bins[right_idx]
+            denom = right_bin - left_bin
+            right_weight = (mid_values - left_bin) / denom
+            left_weight = 1.0 - right_weight
+            target_rows = np.nonzero(mid_mask)[0]
+            distributions[target_rows, left_idx] = left_weight
+            distributions[target_rows, right_idx] = right_weight
+
+        data["value"] = distributions.reshape(*batch_shape, self.n_bins)
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class SerializeValues(DataTransformFn):
+    """Serialize discrete value predictions into a single scalar value."""
+    n_bins: int = 256
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "value" not in data:
+            return data
+        value = np.asarray(data["value"], dtype=np.float32)
+        bins = np.linspace(-1.0, 0.0, self.n_bins, dtype=np.float32)
+        serialized_value = np.sum(value * bins, axis=-1, keepdims=True)
+        data["value"] = serialized_value
+        return data
 
 
 @dataclasses.dataclass(frozen=True)
@@ -249,6 +332,34 @@ class AbsoluteActions(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class UnwrappedDeltaActions(DataTransformFn):
+    """Unwrapped delta actions designed for euler angles."""
+
+    mask: Sequence[bool] | None
+
+    def __call__(self, data:DataDict) -> DataDict:
+        if "actions" not in data or self.mask is None:
+            return data
+        
+        state, actions = data["state"], data["actions"]
+        if state.shape[-1] < actions.shape[-1]:
+            state = torch.from_numpy(pad_to_dim(state, actions.shape[-1], axis=-1)).type_as(actions)
+        mask = np.asarray(self.mask)
+        dims = mask.shape[-1]
+        #================= Unwrapping process for an action chunk =================
+        state_euler_angles = state[..., 3:6]
+        action_euler_angles = actions[..., 3:6]
+        concat_chunk = np.concatenate((np.expand_dims(state_euler_angles, axis=-2), action_euler_angles), axis=-2)
+        unwrapped_chunk = torch.from_numpy(np.unwrap(concat_chunk, axis=-2)).type_as(state)
+        state[..., 3:6] = unwrapped_chunk[..., 0, :]
+        actions[..., 3:6] = unwrapped_chunk[..., 1:, :]
+        #================= Unwrapping process for an action chunk =================
+        actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
+        data["actions"] = actions
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False
@@ -264,15 +375,17 @@ class TokenizePrompt(DataTransformFn):
             state = None
 
         bsz = 1
+        prompt_ndims = 0
         if not isinstance(prompt, str):
             try:
+                prompt_ndims = len(prompt.shape)
                 prompt = prompt.item()
             except:
                 bsz = prompt.shape[0]
                 prompt = prompt[0]
 
         tokens, token_masks = self.tokenizer.tokenize(prompt, state)
-        if bsz > 1:
+        if bsz > 1 or prompt_ndims > 0:
             tokens = np.repeat(tokens[None, ...], bsz, axis=0)
             token_masks = np.repeat(token_masks[None, ...], bsz, axis=0)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}

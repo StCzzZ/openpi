@@ -63,11 +63,14 @@ def posemb_sincos(
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
-class Pi0(_model.BaseModel):
-    def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
+class Pi0ValueExpert(_model.BaseModel):
+    def __init__(self, config: pi0_config.Pi0ValueExpertConfig, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.discrete_value = config.discrete_value
+
         paligemma_config = _gemma.get_config(config.paligemma_variant)
+        value_config = _gemma.get_config(config.value_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
@@ -98,6 +101,34 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+
+        # Separate PaliGemma model for value prediction
+        value_llm = nnx_bridge.ToNNX(
+            _gemma.Module(
+                configs=[value_config],
+                embed_dtype=config.dtype,
+                adarms=False
+            )
+        )
+        value_llm.lazy_init(rngs=rngs, method="init", use_adarms=[False])
+        value_img = nnx_bridge.ToNNX(
+            _siglip.Module(
+                num_classes=value_config.width,
+                variant="So400m/14",
+                pool_type="none",
+                scan=True,
+                dtype_mm=config.dtype,
+            )
+        )
+        value_img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
+        self.ValuePaliGemma = nnx.Dict(llm=value_llm, img=value_img)
+
+        # Learnable parameters for value head input
+        self.value_params = nnx.Param(jnp.zeros((1, value_config.width)))
+        if self.discrete_value:
+            self.value_out_proj = nnx.Linear(value_config.width, config.n_bins, rngs=rngs)
+        else:
+            self.value_out_proj = nnx.Linear(value_config.width, 1, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -185,9 +216,52 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.array(ar_mask)
         return tokens, input_mask, ar_mask, adarms_cond
 
+    @at.typecheck
+    def embed_value_prefix(
+        self, obs: _model.Observation
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
+        input_mask = []
+        ar_mask = []
+        tokens = []
+        # embed images
+        for name in obs.images:
+            image_tokens, _ = self.ValuePaliGemma.img(obs.images[name], train=False)
+
+            tokens.append(image_tokens)
+            input_mask.append(
+                einops.repeat(
+                    obs.image_masks[name],
+                    "b -> b s",
+                    s=image_tokens.shape[1],
+                )
+            )
+            # image tokens attend to each other
+            ar_mask += [False] * image_tokens.shape[1]
+
+        # add language (aka tokenized inputs)
+        if obs.tokenized_prompt is not None:
+            tokenized_inputs = self.ValuePaliGemma.llm(obs.tokenized_prompt, method="embed")
+            tokens.append(tokenized_inputs)
+            input_mask.append(obs.tokenized_prompt_mask)
+            # full attention between image and language inputs
+            ar_mask += [False] * tokenized_inputs.shape[1]
+        tokens = jnp.concatenate(tokens, axis=1)
+        input_mask = jnp.concatenate(input_mask, axis=1)
+        ar_mask = jnp.array(ar_mask)
+        return tokens, input_mask, ar_mask
+
+    @at.typecheck
+    def embed_value_suffix(
+        self, obs: _model.Observation
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
+        tokens = self.value_params[:, None, :].repeat(obs.state.shape[0], axis=0)
+        input_mask = jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_)
+        ar_mask = jnp.array([True])
+        return tokens, input_mask, ar_mask
+
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
@@ -206,12 +280,32 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+        (_, suffix_out), _ = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        action_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        # forward pass of value network
+        value_prefix_tokens, value_prefix_mask, value_prefix_ar_mask = self.embed_value_prefix(observation)
+        value_suffix_tokens, value_suffix_mask, value_suffix_ar_mask = self.embed_value_suffix(observation)
+        value_input_mask = jnp.concatenate([value_prefix_mask, value_suffix_mask], axis=1)
+        value_ar_mask = jnp.concatenate([value_prefix_ar_mask, value_suffix_ar_mask], axis=0)
+        value_attn_mask = make_attn_mask(value_input_mask, value_ar_mask)
+        value_positions = jnp.cumsum(value_input_mask, axis=1) - 1
+        value_tokens = jnp.concatenate([value_prefix_tokens, value_suffix_tokens], axis=1)
+        value_output, _ = self.ValuePaliGemma.llm(
+            [value_tokens], mask=value_attn_mask, positions=value_positions
+        )
+        value_suffix_out = jnp.split(value_output[0], [value_prefix_tokens.shape[1]], axis=1)[1]
+        value_pred = self.value_out_proj(value_suffix_out)
+        if self.discrete_value:
+            value_pred = nnx.log_softmax(value_pred, axis=-1)
+            value_loss = 0.1 * jnp.sum(-value[:, None, :] * value_pred, axis=-1)
+        else:
+            value_pred = nnx.sigmoid(value_pred)
+            value_loss = jnp.mean(jnp.square(value_pred + value[:, None, :]), axis=-1) # because the data has negative values
+        return action_loss + value_loss, action_loss, value_loss
 
     @override
     def sample_actions(
@@ -279,16 +373,28 @@ class Pi0(_model.BaseModel):
         return x_0
 
     @override
-    def extract_visual_embeddings(self, obs: _model.Observation, img_key: str="base_0_rgb") -> jnp.ndarray:
-        observation = _model.preprocess_observation(None, obs, train=False)
-        observation = jax.tree.map(lambda x: jax.lax.stop_gradient(x), observation)
-        # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        (prefix_out, _), _ = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-        image_size = observation.images[img_key].shape[1:-1]
-        patch_size = self.PaliGemma.img.module.patch_size
-        num_patches = (image_size[0] // patch_size[0]) * (image_size[1] // patch_size[1])
-        prefix_out = prefix_out[:, :num_patches, :].mean(axis=1)
-        return prefix_out
+    def predict_value(
+        self,
+        observation: _model.Observation,
+    ) -> _model.Values:
+        observation = _model.preprocess_observation(None, observation, train=False)
+        # forward pass of value network
+        value_prefix_tokens, value_prefix_mask, value_prefix_ar_mask = self.embed_value_prefix(observation)
+        value_suffix_tokens, value_suffix_mask, value_suffix_ar_mask = self.embed_value_suffix(observation)
+        value_input_mask = jnp.concatenate([value_prefix_mask, value_suffix_mask], axis=1)
+        value_ar_mask = jnp.concatenate([value_prefix_ar_mask, value_suffix_ar_mask], axis=0)
+        value_attn_mask = make_attn_mask(value_input_mask, value_ar_mask)
+        value_positions = jnp.cumsum(value_input_mask, axis=1) - 1
+        value_tokens = jnp.concatenate([value_prefix_tokens, value_suffix_tokens], axis=1)
+        value_output, _ = self.ValuePaliGemma.llm(
+            [value_tokens], mask=value_attn_mask, positions=value_positions
+        )
+        value_suffix_out = jnp.split(value_output[0], [value_prefix_tokens.shape[1]], axis=1)[1]
+        value_pred = self.value_out_proj(value_suffix_out)
+        if self.discrete_value:
+            value_pred = nnx.softmax(value_pred, axis=-1)
+            value_pred = value_pred[:, -1, :]
+        else:
+            value_pred = nnx.sigmoid(value_pred)
+            value_pred = -value_pred[:, -1, :] # because the data should have negative values
+        return value_pred
