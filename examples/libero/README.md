@@ -47,21 +47,36 @@ uv pip install -e packages/openpi-client
 uv pip install -e third_party/libero
 export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
 
-# Run the simulation
-python examples/libero/main.py
-python examples/libero/run_parallel.py --num-envs 20 # parallel policy rollout! 
+
 
 # To run with glx for Mujoco instead (use this if you have egl errors):
-MUJOCO_GL=glx python examples/libero/main.py
-MUJOCO_GL=glx python examples/libero/run_parallel.py --num-envs 20
+
+CUDA_VISIBLE_DEVICES=2 MUJOCO_GL=glx python examples/libero/main.py 
+# CUDA_VISIBLE_DEVICES=1 MUJOCO_GL=glx python examples/libero/run_parallel.py --args.num-envs 20 --args.task_suite_name libero_90
+CUDA_VISIBLE_DEVICES=2 MUJOCO_GL=glx python examples/libero/run_parallel.py --args.num-envs 20 --args.task_suite_name libero_90
+
+CUDA_VISIBLE_DEVICES=7 MUJOCO_GL=glx python examples/libero/run_parallel_with_visualization.py --args.num-envs 5 --args.task_suite_name libero_spatial
+
+CUDA_VISIBLE_DEVICES=7 MUJOCO_GL=glx python examples/libero/run_parallel_with_hil.py --args.num-envs 5 --args.task_suite_name libero_spatial
+
+
+
+# Run the simulation
+CUDA_VISIBLE_DEVICES=2 python examples/libero/main.py --args.task_suite_name libero_90
+CUDA_VISIBLE_DEVICES=2 python examples/libero/run_parallel.py --args.num-envs 20  --args.task_suite_name libero_90 # parallel policy rollout! 
+
+CUDA_VISIBLE_DEVICES=2 python examples/libero/run_parallel_with_visualization.py --args.num-envs 5  --args.task_suite_name libero_90 # parallel policy rollout! 
 ```
+
+
 
 Terminal window 2:
 
 ```bash
 # Run the server
-uv run scripts/serve_policy.py --env LIBERO # single env
-uv run scripts/serve_policy.py --env LIBERO --is-batched # parallel env
+# export SERVER_ARGS="--env LIBERO policy:checkpoint --policy.config pi05_libero --policy.dir ./my_custom_checkpoint"
+CUDA_VISIBLE_DEVICES=2 uv run scripts/serve_policy.py --env LIBERO policy:checkpoint --policy.config pi05_libero --policy.dir /data/yijin/openpi/checkpoints/pi05_libero # single env
+CUDA_VISIBLE_DEVICES=6 uv run scripts/serve_policy.py --env LIBERO --is-batched policy:checkpoint --policy.config pi05_libero --policy.dir /data/yijin/openpi/checkpoints/pi05_libero # parallel env
 ```
 
 ## Results

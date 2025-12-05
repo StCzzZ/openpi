@@ -47,7 +47,7 @@ class Args:
     default_prompt: str | None = None
 
     # Port to serve the policy on.
-    port: int = 8000
+    port: int = 8001
     # Record the policy's behavior for debugging.
     record: bool = False
 
@@ -122,5 +122,8 @@ def main(args: Args) -> None:
 
 
 if __name__ == "__main__":
+    # print(f"Args: {Args}")
+    # print(f"tyro.cli(Args): {tyro.cli(Args)}")
+    # print(f"Default Checkpoints: {DEFAULT_CHECKPOINT}")
     logging.basicConfig(level=logging.INFO, force=True)
     main(tyro.cli(Args))
