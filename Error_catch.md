@@ -51,3 +51,15 @@ to establish ssh tunnel and bind local_host:18002 to the remote server:18002, us
 
 and use "localhost:18002" to connect to the remote server
 
+# To use "convert data to lerobot" you need
+
+```bash
+uv pip install tensorflow(select your own version to match protobuf) tensorflow_dataset
+```
+
+# To enable the GPU-drived tensorflow (individually): 
+
+```bash
+export LD_LIBRARY_PATH=/opt/cudnn-8.6/lib:/usr/local/cuda-11.5/lib64:/usr/local/cuda-11.5/extras/CUPTI/lib64:$LD_LIBRARY_PATH
+```
+

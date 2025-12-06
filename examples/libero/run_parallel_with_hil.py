@@ -1,7 +1,5 @@
 # import os
-# os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''  # 禁用OpenCV的Qt插件
-# os.environ['QT_QPA_PLATFORM'] = 'xcb'  # 强制使用系统X11
-# os.environ['MPLBACKEND'] = 'Qt5Agg'  # 强制matplotlib使用PyQt5
+# os.environ['MPLBACKEND'] = 'Qt5Agg'  # force matplotlib to use PyQt5
 
 import matplotlib
 matplotlib.use('Agg')  # 或 'GTK3Agg'
@@ -40,37 +38,6 @@ import copy
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
-        #     task_successes += np.sum(dones)
-        #     total_successes += np.sum(dones)
-
-        #     task_episodes += args.num_envs
-        #     total_episodes += args.num_envs
-
-        #     # Save a replay video of the episode
-        #     suffix = "success" if dones[0] else "failure"
-        #     task_segment = task_description.replace(" ", "_")
-        #     imageio.mimwrite(
-        #         pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
-        #         [np.asarray(x) for x in replay_images],
-        #         fps=10,
-        #     )
-
-        #     # Log current results
-        #     logging.info(f"Success: {done}")
-        #     logging.info(f"# episodes completed so far: {total_episodes}")
-        #     logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
-
-        #     episode_idx += 1
-
-        
-
-    # # Log final results
-    # logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-    # logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
-
-    # logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
-    # logging.info(f"Total episodes: {total_episodes}")
-
 
 def _get_parallel_libero_env(task, resolution, seed, num_envs):
     """Initializes and returns the LIBERO environment, along with the task description."""
@@ -100,91 +67,6 @@ def _quat2axisangle(quat):
         return np.zeros(3)
 
     return (quat[:3] * 2.0 * math.acos(quat[3])) / den
-
-
-def _space_mouse_client_handler(conn, addr, q, lock, stop_evt):
-    conn.settimeout(1.0)
-    buffer = b""
-    try:
-        while not stop_evt.is_set():
-            try:
-                data = conn.recv(4096)
-                # cprint(f"data received: {data}", "yellow")
-            except socket.timeout:
-                cprint(f"socket timeout from {addr}, continuing...", "yellow")
-                continue
-            if not data:
-                cprint(f"no data recieved.", "red")
-                continue
-            buffer += data
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                text = line.decode().strip()
-                if not text:
-                    continue
-                if text.lower() == "stop":
-                    cprint(f"Received STOP from {addr}", "yellow")
-                    stop_evt.set()
-                    return
-                # try JSON first, fallback to python literal
-                parsed = None
-                try:
-                    parsed = json.loads(text)
-                except Exception:
-                    try:
-                        parsed = ast.literal_eval(text)
-                    except Exception:
-                        parsed = None
-                if parsed is None:
-                    cprint("Ignoring HTTP/WebSocket handshake header", "yellow")
-                    continue
-                if isinstance(parsed, list) and len(parsed) == len(LIBERO_DUMMY_ACTION):
-                    try:
-                        arr = [float(x) for x in parsed]
-                        with lock:
-                            if q.full():
-                                q.get()
-                            q.put(arr)
-                    except Exception:
-                        cprint(f"Received data but failed to convert to floats: {parsed}", "red")
-                else:
-                    pass
-            time.sleep(0.01) # prevent busy loop
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-def _space_mouse_server_thread(host, port, q, lock, stop_evt):
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((host, port))
-    srv.listen(1)
-    srv.settimeout(1.0)
-    cprint(f"Manual-control server listening on {host}:{port}", "green")
-    try:
-        while not stop_evt.is_set():
-            try:
-                conn, addr = srv.accept()
-            except socket.timeout:
-                continue
-            cprint(f"Manual-control client connected from {addr}", "green")
-            _space_mouse_client_handler(conn, addr, q, lock, stop_evt)
-            cprint(f"Manual-control client from {addr} disconnected", "yellow")
-            if stop_evt.is_set():
-                break
-    finally:
-        try:
-            srv.close()
-        except Exception:
-            pass
-    cprint("Manual-control server stopped", "yellow")
-
-
-
-    
-
 
 class LiberoRunner:
 
