@@ -398,3 +398,21 @@ class Pi0ValueExpert(_model.BaseModel):
             value_pred = nnx.sigmoid(value_pred)
             value_pred = -value_pred[:, -1, :] # because the data should have negative values
         return value_pred
+
+    @override
+    def extract_visual_embeddings(self, obs: _model.Observation, img_key: str="base_0_rgb") -> jnp.ndarray:
+        observation = _model.preprocess_observation(None, obs, train=False)
+        observation = jax.tree.map(lambda x: jax.lax.stop_gradient(x), observation)
+        # forward pass of value network
+        value_prefix_tokens, value_prefix_mask, value_prefix_ar_mask = self.embed_value_prefix(observation)
+        value_suffix_tokens, value_suffix_mask, value_suffix_ar_mask = self.embed_value_suffix(observation)
+        value_input_mask = jnp.concatenate([value_prefix_mask, value_suffix_mask], axis=1)
+        value_ar_mask = jnp.concatenate([value_prefix_ar_mask, value_suffix_ar_mask], axis=0)
+        value_attn_mask = make_attn_mask(value_input_mask, value_ar_mask)
+        value_positions = jnp.cumsum(value_input_mask, axis=1) - 1
+        value_tokens = jnp.concatenate([value_prefix_tokens, value_suffix_tokens], axis=1)
+        value_output, _ = self.ValuePaliGemma.llm(
+            [value_tokens], mask=value_attn_mask, positions=value_positions
+        )
+        value_suffix_out = jnp.split(value_output[0], [value_prefix_tokens.shape[1]], axis=1)[1]
+        return value_suffix_out[:, 0, :] # (bsz, emb)

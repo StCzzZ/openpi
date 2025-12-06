@@ -109,5 +109,6 @@ class RewardTransformer(nn.Module):
             progress_preds = self.progress_head(stage_embedding)
             return stage_preds, progress_preds
         else:
+            # progress_preds = -1.0 * self.progress_head(video_tokens) # because the value lands between -1 and 0
             progress_preds = self.progress_head(video_tokens)
             return None, progress_preds
