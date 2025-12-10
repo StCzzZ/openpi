@@ -391,13 +391,13 @@ class Pi0ValueExpertConfig(_model.BaseModelConfig):
 
         return observation_spec, action_spec, value_spec
 
-    def get_freeze_filter(self) -> nnx.filterlib.Filter:
+    def get_freeze_filter(self, freeze_value: bool = False) -> nnx.filterlib.Filter:
         """Returns the freeze filter based on the model config."""
-        filters = []
         has_lora = False
         gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
         action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
         value_llm_filter = nnx_utils.PathRegex(".*ValuePaliGemma/llm.*")
+        filters = [] if not freeze_value else [value_llm_filter]
 
         if "lora" in self.paligemma_variant:
             filters.append(
@@ -408,7 +408,7 @@ class Pi0ValueExpertConfig(_model.BaseModelConfig):
                 filters.append(
                     nnx.Not(action_expert_params_filter),
                 )
-            if "lora" not in self.value_variant:
+            if "lora" not in self.value_variant and not freeze_value:
                 # If only freeze gemma params, exclude value params.
                 filters.append(
                     nnx.Not(value_llm_filter),
@@ -418,13 +418,13 @@ class Pi0ValueExpertConfig(_model.BaseModelConfig):
             filters.append(
                 action_expert_params_filter,
             )
-            if "lora" not in self.value_variant:
+            if "lora" not in self.value_variant and not freeze_value:
                 # If only freeze action expert params, exclude value params.
                 filters.append(
                     nnx.Not(value_llm_filter),
                 )
             has_lora = True
-        elif "lora" in self.value_variant:
+        elif "lora" in self.value_variant and not freeze_value:
             filters.append(
                 value_llm_filter,
             )

@@ -236,7 +236,7 @@ class Pi0SuffixValue(_model.BaseModel):
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    ) -> tuple[at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b 1"]]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -267,7 +267,7 @@ class Pi0SuffixValue(_model.BaseModel):
         value_pred = self.value_out_proj(value_out)
         if self.discrete_value:
             value_pred = nnx.log_softmax(value_pred, axis=-1)
-            value_loss = 0.1 * jnp.sum(-value[:, None, :] * value_pred, axis=-1)
+            value_loss = jnp.sum(-value[:, None, :] * value_pred, axis=-1)
         else:
             value_pred = nnx.sigmoid(value_pred)
             value_loss = jnp.mean(jnp.square(value_pred + value[:, None, :]), axis=-1) # because the data has negative values
@@ -536,7 +536,7 @@ class Pi0PrefixValue(_model.BaseModel):
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    ) -> tuple[at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b 1"]]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -567,7 +567,7 @@ class Pi0PrefixValue(_model.BaseModel):
         value_pred = self.value_out_proj(value_out)
         if self.discrete_value:
             value_pred = nnx.log_softmax(value_pred, axis=-1)
-            value_loss = 0.1 * jnp.sum(-value[:, None, :] * value_pred, axis=-1)
+            value_loss = jnp.sum(-value[:, None, :] * value_pred, axis=-1)
         else:
             value_pred = nnx.sigmoid(value_pred)
             value_loss = jnp.mean(jnp.square(value_pred + value[:, None, :]), axis=-1) # because the data has negative values
