@@ -99,7 +99,9 @@ class MultiStageDataset(dataset.Dataset):
         visual_embeddings = self.padding_sequence(visual_embeddings)
         language_embedding = self._read_language_embedding(episode_dict)
         # Progress is defined to start from the start index of the sample, following ReWIND's convention
+        # total_progress = np.arange(-num_frames + 1, 1, dtype=np.float32) / num_frames
         sampled_progress = np.arange(end_index - start_index, dtype=np.float32) / (num_frames - start_index)
+        # sampled_progress = total_progress[start_index:end_index]
         progress = self.padding_sequence(sampled_progress)
         sample = {
             "visual_embeddings": visual_embeddings,
@@ -134,7 +136,9 @@ class MultiStageDataset(dataset.Dataset):
         visual_embeddings = np.concatenate((seq_forward, seq_backward), axis=0)
         visual_embeddings = self.padding_sequence(visual_embeddings)
         language_embedding = self._read_language_embedding(episode_dict)
+        # total_progress = np.arange(-num_frames + 1, 1, dtype=np.float32) / num_frames
         sampled_progress = np.arange(end_index - start_index, dtype=np.float32) / (num_frames - start_index)
+        # sampled_progress = total_progress[start_index:end_index]
         progress = np.concatenate(
             (sampled_progress, sampled_progress[-2 : split_index - start_index : -1]), axis=0
         )

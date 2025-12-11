@@ -11,6 +11,7 @@ from openpi.models import model as _model
 from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
+from openpi.models.utils.welford import Welford
 from openpi.shared import array_typing as at
 
 logger = logging.getLogger("openpi")
@@ -129,6 +130,9 @@ class Pi0ValueExpert(_model.BaseModel):
             self.value_out_proj = nnx.Linear(value_config.width, config.n_bins, rngs=rngs)
         else:
             self.value_out_proj = nnx.Linear(value_config.width, 1, rngs=rngs)
+
+        # Welford running statistics for value progress normalization.
+        self.progress_stat = nnx.BatchStat(Welford.create((1,)))
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -261,10 +265,19 @@ class Pi0ValueExpert(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+        self, 
+        rng: at.KeyArrayLike, 
+        observation: _model.Observation, 
+        actions: _model.Actions, 
+        value: _model.Values | None = None, 
+        next_obs: _model.Observation | None = None, 
+        *, 
+        train: bool = False
+    ) -> tuple[at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b ah"] | None, at.Float[at.Array, "*b 1"] | None]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+
+        assert value is not None or next_obs is not None, "either value or next_obs must be provided"
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
@@ -301,11 +314,39 @@ class Pi0ValueExpert(_model.BaseModel):
         value_pred = self.value_out_proj(value_suffix_out)
         if self.discrete_value:
             value_pred = nnx.log_softmax(value_pred, axis=-1)
-            value_loss = 0.1 * jnp.sum(-value[:, None, :] * value_pred, axis=-1)
         else:
             value_pred = nnx.sigmoid(value_pred)
-            value_loss = jnp.mean(jnp.square(value_pred + value[:, None, :]), axis=-1) # because the data has negative values
-        return action_loss + value_loss, action_loss, value_loss
+
+        if next_obs is None:
+            if self.discrete_value:
+                value_loss = jnp.sum(-value[:, None, :] * value_pred, axis=-1)
+            else:
+                value_loss = jnp.mean(jnp.square(value_pred + value[:, None, :]), axis=-1)
+            return action_loss + value_loss, action_loss, value_loss
+        else:
+            next_value_prefix_tokens, next_value_prefix_mask, next_value_prefix_ar_mask = self.embed_value_prefix(next_obs)
+            next_value_suffix_tokens, next_value_suffix_mask, next_value_suffix_ar_mask = self.embed_value_suffix(next_obs)
+            next_value_input_mask = jnp.concatenate([next_value_prefix_mask, next_value_suffix_mask], axis=1)
+            next_value_ar_mask = jnp.concatenate([next_value_prefix_ar_mask, next_value_suffix_ar_mask], axis=0)
+            next_value_attn_mask = make_attn_mask(next_value_input_mask, next_value_ar_mask)
+            next_value_positions = jnp.cumsum(next_value_input_mask, axis=1) - 1
+            next_value_tokens = jnp.concatenate([next_value_prefix_tokens, next_value_suffix_tokens], axis=1)
+            next_value_output, _ = self.ValuePaliGemma.llm(
+                [next_value_tokens], mask=next_value_attn_mask, positions=next_value_positions
+            )
+            next_value_suffix_out = jnp.split(next_value_output[0], [next_value_prefix_tokens.shape[1]], axis=1)[1]
+            next_value_pred = self.value_out_proj(next_value_suffix_out)
+            if self.discrete_value:
+                next_value_pred = nnx.log_softmax(next_value_pred, axis=-1)
+                next_value_pred = jnp.sum(jnp.linspace(-1.0, 0.0, next_value_pred.shape[-1])[None, None, :] * next_value_pred, axis=-1)
+                curr_value_pred = jnp.sum(jnp.linspace(-1.0, 0.0, value_pred.shape[-1])[None, None, :] * value_pred, axis=-1)
+            else:
+                next_value_pred = -nnx.sigmoid(next_value_pred)[..., -1]
+                curr_value_pred = -value_pred[..., -1]
+            raw_progress = next_value_pred - curr_value_pred # (bsz, 1)
+            normalized_progress = self._normalize_progress(raw_progress, train=train)
+            action_loss = normalized_progress * action_loss
+            return action_loss
 
     @override
     def sample_actions(
@@ -398,3 +439,36 @@ class Pi0ValueExpert(_model.BaseModel):
             value_pred = nnx.sigmoid(value_pred)
             value_pred = -value_pred[:, -1, :] # because the data should have negative values
         return value_pred
+
+    @override
+    def extract_visual_embeddings(self, obs: _model.Observation, img_key: str="base_0_rgb") -> jnp.ndarray:
+        observation = _model.preprocess_observation(None, obs, train=False)
+        observation = jax.tree.map(lambda x: jax.lax.stop_gradient(x), observation)
+        # forward pass of value network
+        value_prefix_tokens, value_prefix_mask, value_prefix_ar_mask = self.embed_value_prefix(observation)
+        value_suffix_tokens, value_suffix_mask, value_suffix_ar_mask = self.embed_value_suffix(observation)
+        value_input_mask = jnp.concatenate([value_prefix_mask, value_suffix_mask], axis=1)
+        value_ar_mask = jnp.concatenate([value_prefix_ar_mask, value_suffix_ar_mask], axis=0)
+        value_attn_mask = make_attn_mask(value_input_mask, value_ar_mask)
+        value_positions = jnp.cumsum(value_input_mask, axis=1) - 1
+        value_tokens = jnp.concatenate([value_prefix_tokens, value_suffix_tokens], axis=1)
+        value_output, _ = self.ValuePaliGemma.llm(
+            [value_tokens], mask=value_attn_mask, positions=value_positions
+        )
+        value_suffix_out = jnp.split(value_output[0], [value_prefix_tokens.shape[1]], axis=1)[1]
+        return value_suffix_out[:, 0, :] # (bsz, emb)
+
+    def _normalize_progress(self, raw_progress: at.Float[at.Array, "b 1"], train: bool) -> at.Float[at.Array, "b 1"]:
+        # Update running stats during training.
+        if train:
+            self.progress_stat.value = self.progress_stat.value.add_all(raw_progress)
+
+        # Use running stats for normalization.
+        stats = self.progress_stat.value
+        mean = stats.mean
+        # We use population variance (ddof=0) for normalization.
+        std = jnp.sqrt(stats.var_p + 1e-8)
+
+        normalized_prog = (raw_progress - (mean - 2.0 * std)) / (4.0 * std + 1e-8)
+        normalized_prog = jax.lax.stop_gradient(jnp.clip(normalized_prog, 0.0, 1.0))
+        return normalized_prog

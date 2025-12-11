@@ -87,6 +87,13 @@ class DataConfig:
     # LeRobot dataset is using different keys to represent the action.
     action_sequence_keys: Sequence[str] = ("actions",)
 
+    # If true, will use the next observation in the sequence as the observation for the next step.
+    use_next_obs: bool = False
+    # Names of keys that will be used by the data loader to generate the observation sequence. The length of the
+    # sequence is defined by the `action_horizon` field in the model config. This should be adjusted if your
+    # LeRobot dataset is using different keys to represent the observation.
+    obs_sequence_keys: Sequence[str] | None = None
+
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
@@ -109,6 +116,7 @@ class ModelTransformFactory(GroupFactory):
 
     # If provided, will determine the default prompt that be used by the model.
     default_prompt: str | None = None
+    use_next_obs: bool = False
 
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
@@ -116,11 +124,12 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
+                        _transforms.ResizeImages(224, 224, self.use_next_obs),
                         _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len), 
+                            use_next_obs=self.use_next_obs
                         ),
-                        _transforms.PadStatesAndActions(model_config.action_dim),
+                        _transforms.PadStatesAndActions(model_config.action_dim, self.use_next_obs),
                     ],
                 )
             case _model.ModelType.PI05 | _model.ModelType.PI05_PREFIX_VALUE | _model.ModelType.PI05_SUFFIX_VALUE | _model.ModelType.PI05_VALUE_EXPERT:
@@ -131,12 +140,13 @@ class ModelTransformFactory(GroupFactory):
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
-                        _transforms.ResizeImages(224, 224),
+                        _transforms.ResizeImages(224, 224, self.use_next_obs),
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
+                            use_next_obs=self.use_next_obs
                         ),
-                        _transforms.PadStatesAndActions(model_config.action_dim),
+                        _transforms.PadStatesAndActions(model_config.action_dim, self.use_next_obs),
                     ],
                 )
             case _model.ModelType.PI0_FAST:
@@ -519,6 +529,97 @@ class LeRobotMyDataValueConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotMyDataRolloutConfig(DataConfigFactory):
+    """
+    This config is used to configure transforms that are applied at various parts of the data pipeline.
+    For your own dataset, you can copy this class and modify the transforms to match your dataset based on the
+    comments below.
+    """
+
+    extra_delta_transform: bool = False
+    extra_value_transform: bool = False
+    n_bins: int = 256
+    use_next_obs: bool = False
+    obs_sequence_keys: Sequence[str] | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+
+        assert (self.use_next_obs and self.obs_sequence_keys is not None) or (not self.use_next_obs and self.obs_sequence_keys is None), \
+            "use_next_obs and obs_sequence_keys must be either both set or both unset"
+        # The repack transform is *only* applied to the data coming from the dataset,
+        # and *not* during inference. We can use it to make inputs from the dataset look
+        # as close as possible to those coming from the inference environment (e.g. match the keys).
+        # Below, we match the keys in the dataset (which we defined in the data conversion script) to
+        # the keys we use in our inference pipeline (defined in the inference script for libero).
+        # For your own dataset, first figure out what keys your environment passes to the policy server
+        # and then modify the mappings below so your dataset's keys get matched to those target keys.
+        # The repack transform simply remaps key names here.
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # The data transforms are applied to the data coming from the dataset *and* during inference.
+        # Below, we define the transforms for data going into the model (``inputs``) and the transforms
+        # for data coming out of the model (``outputs``) (the latter is only used during inference).
+        # We defined these transforms in `libero_policy.py`. You can check the detailed comments there for
+        # how to modify the transforms to match your dataset. Once you created your own transforms, you can
+        # replace the transforms below with your own.
+        data_transforms = _transforms.Group(
+            inputs=[my_policy.MySequenceInputs(model_type=model_config.model_type)],
+            outputs=[my_policy.MySequenceOutputs()],
+        )
+
+        # One additional data transform: pi0 models are trained on delta actions (relative to the first
+        # state in each action chunk). IF your data has ``absolute`` actions (e.g. target joint angles)
+        # you can uncomment the following line to convert the actions to delta actions. The only exception
+        # is for the gripper actions which are always absolute.
+        # In the example below, we would apply the delta conversion to the first 9 actions (EEF pose) and
+        # leave the 10th action (gripper) unchanged, i.e. absolute.
+        # In Libero, the raw actions in the dataset are already delta actions, so we *do not* need to
+        # apply a separate delta conversion (that's why it's commented out). Choose whether to apply this
+        # transform based on whether your dataset uses ``absolute`` or ``delta`` actions out of the box.
+
+        # LIBERO already represents actions as deltas, but we have some old Pi0 checkpoints that are trained with this
+        # extra delta transform.
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.UnwrappedDeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        if self.extra_value_transform:
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DiscretizeValues(n_bins=self.n_bins)],
+                outputs=[_transforms.SerializeValues(n_bins=self.n_bins)],
+            )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        # You do not need to change anything here for your own dataset.
+        model_transforms = ModelTransformFactory(use_next_obs=self.use_next_obs)(model_config)
+
+        # Use sequential observations to reweight training samples with value estimation
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            obs_sequence_keys=self.obs_sequence_keys,
+            use_next_obs=self.use_next_obs,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -1037,12 +1138,12 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_flexiv_value_expert",
         model=pi0_config.Pi0ValueExpertConfig(pi05=True, action_horizon=10, discrete_state_input=False, \
-            discrete_value=False, n_bins=256),
+            discrete_value=True, n_bins=256),
         data=LeRobotMyDataValueConfig(
             repo_id="Virlus/kitchen_100_value",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
-            extra_value_transform=False,
+            extra_value_transform=True,
             n_bins=256,
         ),
         batch_size=64,
@@ -1058,7 +1159,47 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=40_000,
         freeze_filter=pi0_config.Pi0ValueExpertConfig(pi05=True, action_horizon=10, discrete_state_input=False, \
-            discrete_value=False, n_bins=256).get_freeze_filter(),
+            discrete_value=True, n_bins=256).get_freeze_filter(),
+        fsdp_devices=2,
+    ),
+    ######### Weighted BC with value inferred from pretrained value expert ##########
+    TrainConfig(
+        name="pi05_flexiv_finetune_with_value_expert",
+        model=pi0_config.Pi0ValueExpertConfig(
+            pi05=True, 
+            action_horizon=10, 
+            discrete_state_input=False,
+            discrete_value=True, 
+            n_bins=256,
+        ),
+        data=LeRobotMyDataRolloutConfig(
+            repo_id="Virlus/kitchen_rollout",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+            extra_value_transform=True,
+            n_bins=256,
+            use_next_obs=True,
+            obs_sequence_keys=["image", "wrist_image", "state"],
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("/home/yuwenye/projects/openpi/checkpoints/pi05_flexiv_value_expert/kitchen_100_value_expert_discrete/20000/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=5_000,
+        freeze_filter=pi0_config.Pi0ValueExpertConfig(
+            pi05=True, 
+            action_horizon=10, 
+            discrete_state_input=False,
+            discrete_value=True, 
+            n_bins=256,
+        ).get_freeze_filter(freeze_value=True),
         fsdp_devices=2,
     ),
     ######### Value token appended to the observation tokens (belongs to the prefix model) ##########

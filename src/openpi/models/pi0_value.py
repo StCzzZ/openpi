@@ -236,7 +236,7 @@ class Pi0SuffixValue(_model.BaseModel):
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    ) -> tuple[at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b 1"]]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -267,7 +267,7 @@ class Pi0SuffixValue(_model.BaseModel):
         value_pred = self.value_out_proj(value_out)
         if self.discrete_value:
             value_pred = nnx.log_softmax(value_pred, axis=-1)
-            value_loss = 0.1 * jnp.sum(-value[:, None, :] * value_pred, axis=-1)
+            value_loss = jnp.sum(-value[:, None, :] * value_pred, axis=-1)
         else:
             value_pred = nnx.sigmoid(value_pred)
             value_loss = jnp.mean(jnp.square(value_pred + value[:, None, :]), axis=-1) # because the data has negative values
@@ -357,6 +357,28 @@ class Pi0SuffixValue(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0, value_pred
+
+    @override
+    def extract_visual_embeddings(self, obs:_model.Observation, img_key:str="base_0_rgb") -> jnp.ndarray:
+        observation = _model.preprocess_observation(None, obs, train=False)
+        observation = jax.tree.map(lambda x: jax.lax.stop_gradient(x), observation)
+        prefix_value_time = jnp.ones((observation.state.shape[0],), dtype=jnp.float32)
+        prefix_value_adarms_cond = self._compute_adarms_cond(prefix_value_time)
+
+        # first fill KV cache with a forward pass of the prefix and value tokens
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        value_tokens, value_mask, value_ar_mask = self.embed_value_prefix(observation)
+        prefix_value_mask = jnp.concatenate([prefix_mask, value_mask], axis=1)
+        prefix_value_ar_mask = jnp.concatenate([prefix_ar_mask, value_ar_mask], axis=0)
+        prefix_value_attn_mask = make_attn_mask(prefix_value_mask, prefix_value_ar_mask)
+        positions = jnp.cumsum(prefix_value_mask, axis=1) - 1
+        (_, value_pred_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, value_tokens],
+            mask=prefix_value_attn_mask,
+            positions=positions,
+            adarms_cond=[None, prefix_value_adarms_cond],
+        )
+        return value_pred_out[:, 0, :] # (bsz, emb)
 
 
 
@@ -514,7 +536,7 @@ class Pi0PrefixValue(_model.BaseModel):
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    ) -> tuple[at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b 1"]]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -545,7 +567,7 @@ class Pi0PrefixValue(_model.BaseModel):
         value_pred = self.value_out_proj(value_out)
         if self.discrete_value:
             value_pred = nnx.log_softmax(value_pred, axis=-1)
-            value_loss = 0.1 * jnp.sum(-value[:, None, :] * value_pred, axis=-1)
+            value_loss = jnp.sum(-value[:, None, :] * value_pred, axis=-1)
         else:
             value_pred = nnx.sigmoid(value_pred)
             value_loss = jnp.mean(jnp.square(value_pred + value[:, None, :]), axis=-1) # because the data has negative values
@@ -636,3 +658,24 @@ class Pi0PrefixValue(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0, value_pred
+
+    @override
+    def extract_visual_embeddings(self, obs:_model.Observation, img_key:str="base_0_rgb") -> jnp.ndarray:
+        observation = _model.preprocess_observation(None, obs, train=False)
+        observation = jax.tree.map(lambda x: jax.lax.stop_gradient(x), observation)
+        # first fill KV cache with a forward pass of the prefix and value tokens
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        value_tokens, value_mask, value_ar_mask = self.embed_value_prefix(observation)
+        total_prefix_tokens = jnp.concatenate([prefix_tokens, value_tokens], axis=1)
+        total_prefix_mask = jnp.concatenate([prefix_mask, value_mask], axis=1)
+        total_prefix_ar_mask = jnp.concatenate([prefix_ar_mask, value_ar_mask], axis=0)
+        total_prefix_attn_mask = make_attn_mask(total_prefix_mask, total_prefix_ar_mask)
+        positions = jnp.cumsum(total_prefix_mask, axis=1) - 1
+        (total_prefix_out, _), _ = self.PaliGemma.llm(
+            [total_prefix_tokens, None],
+            mask=total_prefix_attn_mask,
+            positions=positions,
+            adarms_cond=[None, None],
+        )
+        _, value_out = jnp.split(total_prefix_out, [prefix_tokens.shape[1]], axis=1)
+        return value_out[:, 0, :] # (bsz, emb)

@@ -247,7 +247,7 @@ class FlexivRobot:
         target_acc = [0.0] * DOF
         MAX_VEL = [1] * DOF
         MAX_ACC = [1] * DOF
-        self.robot.SendJointPosition(np.array(q), target_vel, target_acc, MAX_VEL, MAX_ACC)
+        self.robot.SendJointPosition(np.array(q), target_vel, MAX_VEL, MAX_ACC)
 
     def get_robot_state(self):
         raw = self._get_robot_status()

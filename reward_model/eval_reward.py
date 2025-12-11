@@ -97,7 +97,8 @@ def main(args: Args) -> None:
     output_dir = Path(args.output_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.policy is not Default():
+    if not isinstance(args.policy, Default):
+        print("Using policy's intrinsic value estimator...")
         policy = create_policy(args)
         with h5py.File(args.dataset_path, "r") as dataset:
             for key in tqdm(dataset.keys(), desc="Processing episodes"):
@@ -133,6 +134,7 @@ def main(args: Args) -> None:
                 LOGGER.info("Saved visualization for episode %s to %s", key, episode_output_path)
 
     else:
+        print("Using post-trained reward model...")
         saved_dict = torch.load(args.reward_model_path, map_location="cpu")
         train_config = EasyDict(**saved_dict["args"])
         backbone_name = getattr(train_config, "backbone", "dinov2_minilm")
@@ -236,6 +238,7 @@ def main(args: Args) -> None:
                         offset_progress_pred = total_progress_pred.unsqueeze(0).repeat(padded_visual_embeddings.shape[0], 1)
                         total_progress_pred = offset_progress_pred[offset_mask_tensor] \
                             + (1. - offset_progress_pred[offset_mask_tensor]) * total_progress_pred # (num_frames, )
+                        # total_progress_pred = progress_preds
 
                 reward_sequence = total_progress_pred.detach().cpu().numpy()
                 episode_output_path = output_dir / f"{key}.mp4"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import logging
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -21,8 +22,12 @@ try:
 except ImportError as exc:  # pragma: no cover - optional dependency
     pass
 
-from openpi.policies import policy_config as _policy_config
-from openpi.training import config as _config
+try:
+    from openpi.policies import policy_config as _policy_config
+    from openpi.training import config as _config
+except ImportError:  # pragma: no cover - optional dependency
+    _policy_config = None  # type: ignore[assignment]
+    _config = None  # type: ignore[assignment]
 
 
 LOGGER = logging.getLogger(__name__)
@@ -130,6 +135,14 @@ class DinoMinilmExtractor(BaseEmbeddingExtractor):
 class Qwen3VLExtractor(BaseEmbeddingExtractor):
     """Embedding extractor backed by Qwen3-VL for end-to-end VLM embeddings."""
 
+    DEFAULT_PROGRESS_PROMPT = (
+        "The preceding images show a full successful demonstration of the task "
+        "from start (0.0) to completion (1.0). The numbered target frames that "
+        "follow belong to a new episode. Provide progress values for each target "
+        "frame in the same order. Respond with only comma-separated decimal numbers "
+        "between 0 and 1 and do not include any reasoning, explanation, or thinking process."
+    )
+
     def __init__(self, backbone: RewardBackboneConfig, params: ExtractorInitParams):
         super().__init__(backbone, params)
         visual_config = backbone.visual_config
@@ -154,6 +167,8 @@ class Qwen3VLExtractor(BaseEmbeddingExtractor):
             attn_implementation=qwen_params.get("attn_implementation", "flash_attention_2"),
             device_map=qwen_params.get("device_map", "auto"),
         )
+        self._default_progress_prompt = str(qwen_params.get("progress_prompt", self.DEFAULT_PROGRESS_PROMPT))
+        self._progress_max_new_tokens = int(qwen_params.get("progress_max_new_tokens", 32))
 
     def extract_visual_embeddings(
         self,
@@ -202,6 +217,74 @@ class Qwen3VLExtractor(BaseEmbeddingExtractor):
             embeddings.append(pooled_embeddings)
         return np.concatenate(embeddings, axis=0)
 
+    def infer_episode_progress(
+        self,
+        reference_frames: np.ndarray,
+        frames: np.ndarray,
+        batch_size: int,
+        progress_prompt: Optional[str] = None,
+        max_new_tokens: Optional[int] = None,
+    ) -> np.ndarray:
+        if reference_frames.size == 0:
+            raise ValueError("At least one reference frame is required for progress estimation.")
+        if frames.size == 0:
+            raise ValueError("Target frames are required for progress estimation.")
+        prompt_text = progress_prompt if progress_prompt is not None else self._default_progress_prompt
+        generation_tokens = max_new_tokens if max_new_tokens is not None else self._progress_max_new_tokens
+        if generation_tokens <= 0:
+            raise ValueError("max_new_tokens must be a positive integer.")
+
+        reference_images = [self._frame_to_pil(frame) for frame in reference_frames]
+        progress_batches: List[np.ndarray] = []
+        total_steps = frames.shape[0]
+        for start in range(0, total_steps, batch_size):
+            end = min(start + batch_size, total_steps)
+            batch_frames = frames[start:end]
+            batch_prompt = self._format_progress_prompt(prompt_text, batch_frames.shape[0])
+            messages = [
+                self._build_progress_message(reference_images, batch_frames, batch_prompt)
+            ]
+            text_inputs = self.processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                padding=True,
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            processor_outputs = self.processor(
+                text=text_inputs,
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                do_resize=False,
+                return_tensors="pt",
+            )
+            model_inputs = {
+                key: value.to(self.device) if isinstance(value, torch.Tensor) else value
+                for key, value in processor_outputs.items()
+            }
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    **model_inputs,
+                    max_new_tokens=generation_tokens,
+                )
+            trimmed_ids = [
+                out_ids[len(in_ids) :]
+                for in_ids, out_ids in zip(model_inputs["input_ids"], generated_ids)
+            ]
+            decoded_outputs = self.processor.batch_decode(
+                trimmed_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            outputs = [self._strip_thought_process(text) for text in decoded_outputs]
+            batch_progress = self._parse_progress_outputs(
+                outputs[0],
+                expected_count=batch_frames.shape[0],
+            )
+            progress_batches.append(np.asarray(batch_progress, dtype=np.float32))
+        return np.concatenate(progress_batches, axis=0)
+
     @staticmethod
     def _build_messages(frames: np.ndarray, prompt: str) -> List[List[Dict[str, object]]]:
         messages: List[List[Dict[str, object]]] = []
@@ -222,6 +305,72 @@ class Qwen3VLExtractor(BaseEmbeddingExtractor):
             )
         return messages
 
+    @staticmethod
+    def _build_progress_message(
+        reference_images: Sequence[Image.Image],
+        query_frames: Sequence[np.ndarray],
+        prompt: str,
+    ) -> List[Dict[str, object]]:
+        content: List[Dict[str, object]] = [{"type": "text", "text": "Reference demonstration frames:"}]
+        for idx, image in enumerate(reference_images, start=1):
+            content.append({"type": "text", "text": f"Reference frame {idx}:"})
+            content.append({"type": "image", "image": image})
+        content.append({"type": "text", "text": "Target episode frames:"})
+        for idx, frame in enumerate(query_frames, start=1):
+            content.append({"type": "text", "text": f"Target frame {idx}:"})
+            content.append({"type": "image", "image": Qwen3VLExtractor._frame_to_pil(frame)})
+        content.append({"type": "text", "text": prompt})
+        return [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ]
+
+    @staticmethod
+    def _frame_to_pil(frame: np.ndarray) -> Image.Image:
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+        return Image.fromarray(frame)
+
+    @staticmethod
+    @staticmethod
+    def _format_progress_prompt(base_prompt: str, num_frames: int) -> str:
+        suffix = (
+            f"There are {num_frames} target frame(s). Respond with {num_frames} decimal number(s) "
+            "between 0 and 1, separated by commas, where each number corresponds to the target frames "
+            "in order. Do not include any reasoning, explanations, or thinking process text—output only "
+            "the numbers."
+        )
+        return f"{base_prompt.strip()} {suffix}"
+
+    @staticmethod
+    def _parse_progress_outputs(output_text: str, expected_count: int) -> List[float]:
+        # LOGGER.info(output_text)
+        matches = re.findall(r"(-?\d+(?:\.\d+)?)\s*(%?)", output_text)
+        values: List[float] = []
+        for value_str, percent_flag in matches:
+            value = float(value_str)
+            is_percent = percent_flag == "%" or value > 1.0
+            if is_percent:
+                value /= 100.0
+            values.append(float(np.clip(value, 0.0, 1.0)))
+        if len(values) < expected_count:
+            LOGGER.warning(
+                "Expected %d progress values but only parsed %d from output: %s",
+                expected_count,
+                len(values),
+                output_text,
+            )
+            values.extend([float("nan")] * (expected_count - len(values)))
+        return values[:expected_count]
+
+    @staticmethod
+    def _strip_thought_process(output_text: str) -> str:
+        cleaned = re.sub(r"(?is)<think>.*?</think>", " ", output_text)
+        cleaned = re.sub(r"(?is)(?:thought|reasoning|think)\s*:\s*.*?(?=\n\s*\n|$)", " ", cleaned)
+        return cleaned.strip()
+
 
 class Pi0InternalExtractor(BaseEmbeddingExtractor):
     """Intrinsic visual embeddings from pretrained Pi0 / Pi0.5 models."""
@@ -233,6 +382,11 @@ class Pi0InternalExtractor(BaseEmbeddingExtractor):
         if visual_config.kind != "pi0_internal":
             raise ValueError("Pi0/Pi0.5 internal configuration is missing.")
         pi0_params = visual_config.params
+
+        if _policy_config is None or _config is None:
+            raise ImportError(
+                "Pi0 internal extractor requires openpi.policies.policy_config and openpi.training.config."
+            )
 
         self.device = params.device
         self.policy = _policy_config.create_trained_policy(

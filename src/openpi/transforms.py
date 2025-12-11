@@ -268,9 +268,12 @@ class Unnormalize(DataTransformFn):
 class ResizeImages(DataTransformFn):
     height: int
     width: int
+    use_next_obs: bool = False
 
     def __call__(self, data: DataDict) -> DataDict:
         data["image"] = {k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["image"].items()}
+        if self.use_next_obs:
+            data["next_image"] = {k: image_tools.resize_with_pad(v, self.height, self.width) for k, v in data["next_image"].items()}
         return data
 
 
@@ -363,6 +366,7 @@ class UnwrappedDeltaActions(DataTransformFn):
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False
+    use_next_obs: bool = False
 
     def __call__(self, data: DataDict) -> DataDict:
         if (prompt := data.pop("prompt", None)) is None:
@@ -371,8 +375,12 @@ class TokenizePrompt(DataTransformFn):
         if self.discrete_state_input:
             if (state := data.get("state", None)) is None:
                 raise ValueError("State is required.")
+            if self.use_next_obs:
+                if (next_state := data.get("next_state", None)) is None:
+                    raise ValueError("Next state is required.")
         else:
             state = None
+            next_state = None
 
         bsz = 1
         prompt_ndims = 0
@@ -388,7 +396,24 @@ class TokenizePrompt(DataTransformFn):
         if bsz > 1 or prompt_ndims > 0:
             tokens = np.repeat(tokens[None, ...], bsz, axis=0)
             token_masks = np.repeat(token_masks[None, ...], bsz, axis=0)
-        return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
+        if self.use_next_obs:
+            next_tokens, next_token_masks = self.tokenizer.tokenize(prompt, next_state)
+            if bsz > 1 or prompt_ndims > 0:
+                next_tokens = np.repeat(next_tokens[None, ...], bsz, axis=0)
+                next_token_masks = np.repeat(next_token_masks[None, ...], bsz, axis=0)
+
+        tokenized_outputs = {
+            **data, 
+            "tokenized_prompt": tokens, 
+            "tokenized_prompt_mask": token_masks, 
+        }
+        if self.use_next_obs:
+            tokenized_outputs.update({
+                "next_tokenized_prompt": next_tokens,
+                "next_tokenized_prompt_mask": next_token_masks
+            })
+        
+        return tokenized_outputs
 
 
 @dataclasses.dataclass(frozen=True)
@@ -454,11 +479,14 @@ class PadStatesAndActions(DataTransformFn):
     """Zero-pads states and actions to the model action dimension."""
 
     model_action_dim: int
+    use_next_obs: bool = False
 
     def __call__(self, data: DataDict) -> DataDict:
         data["state"] = pad_to_dim(data["state"], self.model_action_dim, axis=-1)
         if "actions" in data:
             data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
+        if self.use_next_obs:
+            data["next_state"] = pad_to_dim(data["next_state"], self.model_action_dim, axis=-1)
         return data
 
 

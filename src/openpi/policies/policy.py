@@ -59,10 +59,14 @@ class Policy(BasePolicy):
             self._model = self._model.to(pytorch_device)
             self._model.eval()
             self._sample_actions = model.sample_actions
+            if hasattr(model, "predict_value"):
+                self._predict_value = model.predict_value
         else:
             # JAX model setup
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
             self._rng = rng or jax.random.key(0)
+            if hasattr(model, "predict_value"):
+                self._predict_value = nnx_utils.module_jit(model.predict_value)
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
@@ -92,6 +96,9 @@ class Policy(BasePolicy):
         model_output = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
         if isinstance(model_output, tuple):
             actions, value = model_output
+        elif hasattr(self._model, "predict_value"):
+            actions = model_output
+            value = self._predict_value(observation)
         else:
             actions = model_output
             value = None
@@ -136,6 +143,9 @@ class Policy(BasePolicy):
         model_output = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
         if isinstance(model_output, tuple):
             actions, value = model_output
+        elif hasattr(self._model, "predict_value"):
+            actions = model_output
+            value = self._predict_value(observation)
         else:
             actions = model_output
             value = None

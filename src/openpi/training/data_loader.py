@@ -143,11 +143,16 @@ def create_torch_dataset(
     cprint(f"repo_id: {repo_id}", "yellow")
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    delta_timestamps = {
+        key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+    }
+    if data_config.obs_sequence_keys is not None:
+        delta_timestamps.update({
+            key: [t / dataset_meta.fps for t in [0, action_horizon]] for key in data_config.obs_sequence_keys
+        })
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+        delta_timestamps=delta_timestamps,
     )
 
     if data_config.prompt_from_task:
@@ -542,7 +547,13 @@ class DataLoaderImpl(DataLoader):
 
     def __iter__(self):
         for batch in self._data_loader:
-            if "value" in batch:
-                yield _model.Observation.from_dict(batch), batch["actions"], batch["value"]
+            if self._data_config.use_next_obs:
+                next_obs_batch = {k.replace("next_", ""): v for k, v in batch.items() if k.startswith("next_")}
+                next_obs_batch = _model.Observation.from_dict(next_obs_batch)
             else:
-                yield _model.Observation.from_dict(batch), batch["actions"]
+                next_obs_batch = None
+            if "value" in batch:
+                value_batch = batch["value"]
+            else:
+                value_batch = None
+            yield _model.Observation.from_dict(batch), batch["actions"], value_batch, next_obs_batch
