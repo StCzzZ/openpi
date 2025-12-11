@@ -8,6 +8,7 @@ import time
 import collections
 import h5py
 import os
+from scipy.spatial.transform import Rotation as R
 
 from hardware.robot_env import RobotEnv
 from hardware.my_device.macros import CAM_SERIAL, HUMAN, ROBOT, CANONICAL_EULER_ANGLES
@@ -52,7 +53,7 @@ class Args:
     # Utils
     #################################################################################################################
     output_dir: str = "data/flexiv/rollout_data"  # Path to save rollout data
-    output_name: str = "1201_kitchen_100_value"
+    output_name: str = "1211_kitchen_100_value_expert_discrete"
     seed: int = 7  # Random Seed (for reproducibility)
 
 
@@ -62,7 +63,7 @@ def main(args: Args) -> None:
     np.random.seed(args.seed)
 
     # Task description
-    task_description = "Put the items in the pot."
+    task_description = "Put the items in the pot"
     
     # Initialize robot environment
     if isinstance(args.resize_size, int):
@@ -117,6 +118,7 @@ def main(args: Args) -> None:
             random_init_pose[2] = max(random_init_pose[2], 0.15)
         
         robot_state = robot_env.reset_robot(args.random_init, random_init_pose)
+        detach_pos, detach_rot = robot_env.detach_sigma()
         time.sleep(10)
         action_plan = collections.deque()
         tcp_rot_history = [CANONICAL_EULER_ANGLES] # to prevent gimbal lock problem of euler angles in the observation space
@@ -152,6 +154,8 @@ def main(args: Args) -> None:
                 break
 
             if not robot_env.keyboard.help:
+                if detach_pos is None:
+                    detach_pos, detach_rot = robot_env.detach_sigma()
                 start_time = time.time()
 
                 # Get observations
@@ -167,12 +171,6 @@ def main(args: Args) -> None:
                     }
                     model_output = client.infer(element)
                     action_chunk = model_output["actions"]
-                    # Save predicted value to buffer
-                    if "value" in model_output:
-                        value = model_output["value"]
-                        if "value" not in episode_buffers:
-                            episode_buffers["value"] = []
-                        episode_buffers["value"].append(value)
                     assert(
                         len(action_chunk) >= args.replan_steps
                     ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
@@ -193,7 +191,22 @@ def main(args: Args) -> None:
                 t += 1
             else:
                 if len(action_plan):
-                    action_plan.clear()
+                    action_plan.popleft()
+                    value_start_t = None if len(action_plan) else t
+                elif episode_buffers['action_mode'][-1] == ROBOT:
+                    value_start_t = t
+                
+                if detach_pos is not None:
+                    robot_env.sigma.resume()
+                    curr_tcp_pose = robot_env.get_robot_state()["tcp_pose"]
+                    curr_pos = curr_tcp_pose[:3]
+                    curr_rot = R.from_euler('XYZ', curr_tcp_pose[3:6], degrees=False)
+                    translate = curr_pos - detach_pos
+                    rotation = detach_rot.inv() * curr_rot
+                    robot_env.sigma.transform_from_robot(translate, rotation)
+                    detach_pos = None
+                    detach_rot = None
+
                 teleop_data = robot_env.human_teleop_step()
                 if teleop_data is None:
                     continue
@@ -201,6 +214,16 @@ def main(args: Args) -> None:
                 standard_tcp_rot = np.unwrap(np.stack((tcp_rot_history[-1], teleop_data['tcp_pose'][3:6]), axis=0), axis=0)[1, :]
                 tcp_rot_history.append(standard_tcp_rot) # Prevent gimbal lock
                 teleop_data['tcp_pose'] = np.concatenate((teleop_data['tcp_pose'][:3], standard_tcp_rot), axis=0)
+
+                if len(action_plan) == 0 and (t - value_start_t) % args.fps == 0: # Impose an even logging of predicted values
+                    element = {
+                        "observation/image": teleop_data['side_img'],
+                        "observation/wrist_image": teleop_data['wrist_img'],
+                        "observation/state": teleop_data['tcp_pose'],
+                        "prompt": task_description,
+                    }
+                    model_output = client.infer(element)
+
                 # Save to buffer
                 for buffer_key, teleop_data_key in KEY_MAPPING.items():
                     episode_buffers[buffer_key].append(teleop_data[teleop_data_key])
@@ -210,6 +233,12 @@ def main(args: Args) -> None:
                     robot_env.keyboard.infer = False
                 
                 t += 1
+
+            # Save predicted value to buffer
+            if "value" in model_output:
+                if "value" not in episode_buffers:
+                    episode_buffers["value"] = []
+                episode_buffers["value"].append(model_output["value"])
 
         logging.info(f"Rollout {i+1}/{args.num_rollouts} timeout")
 
