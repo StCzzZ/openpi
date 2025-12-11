@@ -280,6 +280,8 @@ class BaseModel(nnx.Module, abc.ABC):
         rng: at.KeyArrayLike,
         observation: Observation,
         actions: Actions,
+        value: Values | None = None,
+        next_obs: Observation | None = None,
         *,
         train: bool = False,
     ) -> at.Float[at.Array, "*b ah"]: ...

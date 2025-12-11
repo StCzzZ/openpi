@@ -79,9 +79,14 @@ def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shap
         logging.warning(f"Weights validation warning: {e}")
         logging.warning("Proceeding with partial loading.")
 
-    # Remove jax.ShapeDtypeStruct from the loaded params. This makes sure that only the loaded params are returned.
+    def has_shape_dtype_struct(x) -> bool:
+        """Check if any leaf in the pytree is a ShapeDtypeStruct."""
+        leaves = jax.tree_util.tree_leaves(x)
+        return any(isinstance(leaf, jax.ShapeDtypeStruct) for leaf in leaves)
+
+    # Remove entries that contain jax.ShapeDtypeStruct in their leaves. This ensures only loaded params are returned.
     return traverse_util.unflatten_dict(
-        {k: v for k, v in traverse_util.flatten_dict(loaded_params).items() if not isinstance(v, jax.ShapeDtypeStruct)}
+        {k: v for k, v in traverse_util.flatten_dict(loaded_params).items() if not has_shape_dtype_struct(v)}
     )
 
 
