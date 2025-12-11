@@ -23,6 +23,8 @@ import threading
 import queue
 import tqdm
 import tyro
+import os
+import shutil
 
 # ignore warnings
 import warnings
@@ -32,8 +34,9 @@ import json
 import ast
 import time
 from typing import Dict, List, Optional
-import zarr  # uv pip linstall h5py==3.7.0 to match numpy 1.22.4 TODO
+import h5py  # uv pip install h5py==3.7.0 to match numpy 1.22.4 TODO
 import copy
+
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -99,17 +102,19 @@ class LiberoRunner:
         self.client = _websocket_client_policy.WebsocketClientPolicy(self.args.host, self.args.port)
 
         # Start evaluation, evaluate for a single task for now
-        task_id = 3
-        task = task_suite.get_task(task_id)
+        self.task_id = 3
+        task = task_suite.get_task(self.task_id)
 
         # IMG visualization windows
         self.policy_rollout_window_name = "policy rollout view"
         self.policy_rollout_wrist_window_name = "policy rollout wrist view"
-        # cv2.namedWindow(self.policy_rollout_window_name, cv2.WINDOW_NORMAL)
-        # cv2.namedWindow(self.policy_rollout_wrist_window_name, cv2.WINDOW_NORMAL)
+
+        if self.args.vis_eval:
+            cv2.namedWindow(self.policy_rollout_window_name, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(self.policy_rollout_wrist_window_name, cv2.WINDOW_NORMAL)
 
         # Get default LIBERO initial states, Initialize environment and task description
-        self.initial_states = task_suite.get_task_init_states(task_id) # initial_states: np.ndarray], shape: (num_envs, state_dim)
+        self.initial_states = task_suite.get_task_init_states(self.task_id) # initial_states: np.ndarray], shape: (num_envs, state_dim)
         self.env, self.task_description = _get_parallel_libero_env(task, LIBERO_ENV_RESOLUTION, self.args.seed, self.args.num_envs)
         # HIL_env to avoid env step conflict. 
         self.HIL_env, _ = _get_parallel_libero_env(task, LIBERO_ENV_RESOLUTION, self.args.seed, 1)
@@ -137,14 +142,15 @@ class LiberoRunner:
         self.env_running_timesteps = self.env_timesteps[self.running_env_indices]
 
         # Failure detection initialization manually set a "OOD" state for debugging, will be replaced by ARMADA later
-        self.OOD_state_rate = np.array([0.005]*self.args.num_envs)  # 1% OOD states
-        # self.OOD_state_rate = np.array([0.0]*self.args.num_envs)  # 0% OOD states
+        # self.OOD_state_rate = np.array([0.002]*self.args.num_envs)  # 1% OOD states
+        self.OOD_state_rate = np.array([0.0]*self.args.num_envs)  # 0% OOD states
         
         # action, state, img buffers for all envs
         self.action_buffer = np.zeros((self.args.max_buffer_size, self.args.num_envs, len(LIBERO_DUMMY_ACTION)), dtype=float)
         self.input_states_buffer = np.zeros((self.args.max_buffer_size, self.args.num_envs, state_init.shape[1]), dtype=float)
         self.img_buffer = np.zeros((self.args.max_buffer_size, self.args.num_envs, self.args.resize_size, self.args.resize_size, 3), dtype=np.uint8)
         self.wrist_img_buffer = np.zeros((self.args.max_buffer_size, self.args.num_envs, self.args.resize_size, self.args.resize_size, 3), dtype=np.uint8)
+        self.hil_indicator_buffer = np.zeros((self.args.max_buffer_size, self.args.num_envs), dtype=np.uint8)
 
         # add a global obs_manager to manage the obs for all envs in HIL and  NON-HIL control
         self.obs_manager = copy.deepcopy(obs)
@@ -154,6 +160,7 @@ class LiberoRunner:
         ###### Variables for spacemouse server manager ######
         self.listening_stop_evt = threading.Event()
         self.HIL_stop_evt = threading.Event()
+        self.conn_handler_stop_ent = threading.Event()
         self._listening_thread = threading.Thread(target=self._listening_server_loop, daemon=True)
         self._HIL_thread = threading.Thread(target=self._HIL_loop, daemon=True)
         self.lock = threading.Lock()
@@ -169,6 +176,158 @@ class LiberoRunner:
         self.HIL_counterfeit_id = np.array([0], dtype=int)  # workaround. 
         self.counterfeit_env_lock = threading.Lock()
 
+
+        ###### Variables for data recording ######
+        # Initialize h5py file for recording successful trajectories
+        if self.args.save_traj:
+
+            pathlib.Path(self.args.data_record_tmp_path).mkdir(parents=True, exist_ok=True)
+            # task_file_name = self.task_description.replace(" ", "_")
+            h5py_filename = pathlib.Path(self.args.data_record_tmp_path) / f"{self.args.task_suite_name}_id{self.task_id}.h5"
+            
+            if os.path.exists(h5py_filename):
+                cprint(f"File {h5py_filename} already exists. It will be overwritten.", "red")
+                os.remove(h5py_filename)
+            
+            self.final_h5py_filename = pathlib.Path(self.args.data_record_path) / f"{self.args.task_suite_name}_id{self.task_id}.h5"
+            cprint(f"h5_filename: {h5py_filename}, self.final_h5py_filename: {self.final_h5py_filename}", "green")
+            os.makedirs(os.path.dirname(self.final_h5py_filename), exist_ok=True)  # Ensure the directory exists
+
+            self.h5_file = h5py.File(h5py_filename, "w")
+
+            # Create datasets for action and timesteps (outside obs group)
+            self.h5_action_dset = self.h5_file.create_dataset(
+                "actions",
+                shape=(0, len(LIBERO_DUMMY_ACTION)),
+                maxshape=(None, len(LIBERO_DUMMY_ACTION)),
+                dtype=float,
+                chunks=True,
+                compression="gzip",
+                compression_opts=4
+            )
+            self.h5_episode_ends_dset = self.h5_file.create_dataset(
+                "episode_lengths",
+                shape=(0,),
+                maxshape=(None,),
+                dtype=int,
+                chunks=True,
+                compression="gzip",
+                compression_opts=4
+            )
+
+            self.h5_task_description_dset = self.h5_file.create_dataset(
+                "task_descriptions",
+                shape=(0,),
+                maxshape=(None,),
+                dtype=h5py.string_dtype(encoding='utf-8'),
+                chunks=True,
+                compression="gzip",
+                compression_opts=4
+            )
+
+            self.h5_hil_indicator_dset = self.h5_file.create_dataset(
+                "hil_indicator",
+                shape=(0, ),
+                maxshape=(None, ),
+                dtype=np.uint8,
+                chunks=True,
+                compression="gzip",
+                compression_opts=4
+            )
+
+            # Create 'obs' group and datasets within it
+            obs_group = self.h5_file.create_group("obs")
+            self.h5_input_states_dset = obs_group.create_dataset(
+                "states",
+                shape=(0, state_init.shape[1]),
+                maxshape=(None, state_init.shape[1]),
+                dtype=float,
+                chunks=True,
+                compression="gzip",
+                compression_opts=4
+            )
+            self.h5_img_dset = obs_group.create_dataset(
+                "image",
+                shape=(0, self.args.resize_size, self.args.resize_size, 3),
+                maxshape=(None, self.args.resize_size, self.args.resize_size, 3),
+                dtype=np.uint8,
+                chunks=True,
+                compression="gzip",
+                compression_opts=6
+            )
+            self.h5_wrist_img_dset = obs_group.create_dataset(
+                "wrist_image",
+                shape=(0, self.args.resize_size, self.args.resize_size, 3),
+                maxshape=(None, self.args.resize_size, self.args.resize_size, 3),
+                dtype=np.uint8,
+                chunks=True,
+                compression="gzip",
+                compression_opts=6
+            )
+
+            # push a "0" to episode_lengths dataset to initialize
+            self.h5_episode_ends_dset.resize(1, axis=0)
+            self.h5_episode_ends_dset[0] = 0
+            self.h5_file.flush()
+
+            # Counter for trajectory index
+            self.trajectory_counter = 0
+            self.h5_lock = threading.Lock()
+
+            logging.info(f"H5py file created at: {h5py_filename}")
+
+
+    def _save_trajectory_to_h5(self, env_id: int, num_steps: int) -> None:
+        """Save successful trajectory data to h5py file for a specific environment."""
+        if num_steps <= 0:
+            return
+
+        with self.lock:
+            # Extract data for this trajectory
+            actions = self.action_buffer[:num_steps, env_id, :]  # shape: (num_steps, 7)
+            states = self.input_states_buffer[:num_steps, env_id, :]  # shape: (num_steps, state_dim)
+            images = self.img_buffer[:num_steps, env_id, :, :, :]  # shape: (num_steps, H, W, 3)
+            wrist_images = self.wrist_img_buffer[:num_steps, env_id, :, :, :]  # shape: (num_steps, H, W, 3)
+            hil_indicators = self.hil_indicator_buffer[:num_steps, env_id]  # shape: (num_steps,)
+            task_descriptions = self.task_description
+
+        with self.h5_lock:
+            # Get current dataset sizes
+            current_dataset_length = self.h5_action_dset.shape[0]
+            current_episode_count = self.h5_episode_ends_dset.shape[0]
+            new_dataset_length = current_dataset_length + num_steps
+
+            # Resize datasets to accommodate new data
+            self.h5_episode_ends_dset.resize(current_episode_count + 1, axis=0)
+            self.h5_task_description_dset.resize(current_episode_count + 1, axis=0)
+            self.h5_action_dset.resize(new_dataset_length, axis=0)
+            self.h5_hil_indicator_dset.resize(new_dataset_length, axis=0)
+            
+            self.h5_input_states_dset.resize(new_dataset_length, axis=0)
+            self.h5_img_dset.resize(new_dataset_length, axis=0)
+            self.h5_wrist_img_dset.resize(new_dataset_length, axis=0)
+            
+            # Write data to datasets
+            self.h5_episode_ends_dset[current_episode_count] = new_dataset_length -1
+            self.h5_task_description_dset[current_episode_count] = task_descriptions
+            self.h5_action_dset[current_dataset_length:new_dataset_length] = actions
+            self.h5_hil_indicator_dset[current_dataset_length:new_dataset_length] = hil_indicators
+
+            self.h5_input_states_dset[current_dataset_length:new_dataset_length] = states
+            self.h5_img_dset[current_dataset_length:new_dataset_length] = images
+            self.h5_wrist_img_dset[current_dataset_length:new_dataset_length] = wrist_images
+
+            self.trajectory_counter += 1
+            try:
+                self.h5_file.flush()
+                cprint(f"Trajectory {self.trajectory_counter} saved to h5py (env {env_id}, {num_steps} steps)", "cyan")
+                cprint(f"current_dataset_length: {current_dataset_length}, new_dataset_length: {new_dataset_length}, current_episode_count: {current_episode_count}", "cyan")
+            except Exception as e:
+                logging.error(f"Error while saving trajectory: {e}")
+                self.h5_file.close()
+                raise
+
+
     def eval_libero_parallel(self) -> None:
 
         # start the HIL server thread
@@ -180,6 +339,9 @@ class LiberoRunner:
                 
                 if len(self.running_env_indices) == 0:
                     # cprint("All envs are under HIL control, skipping policy rollout.", "yellow")
+                    # a bug here, we should update the running_env_indices and the corresponding env_running timesteps here, otherwise we will not know whether the running_env_index is released by the HIL envs.
+                    self.running_env_indices = np.where(self.hil_indicator == False)[0]
+                    self.env_running_timesteps = self.env_timesteps[self.running_env_indices]
                     time.sleep(1.0)
                     continue
 
@@ -189,11 +351,12 @@ class LiberoRunner:
                 wrist_img = np.stack([np.ascontiguousarray(x["robot0_eye_in_hand_image"][::-1, ::-1]) for x in self.obs_manager], axis=0)
                 img = image_tools.convert_to_uint8(image_tools.resize_with_pad(img, self.args.resize_size, self.args.resize_size))
                 wrist_img = image_tools.convert_to_uint8(image_tools.resize_with_pad(wrist_img, self.args.resize_size, self.args.resize_size))
-                # cv2.imshow(self.policy_rollout_window_name, cv2.cvtColor(img[0], cv2.COLOR_RGB2BGR))
-                # cv2.imshow(self.policy_rollout_wrist_window_name, cv2.cvtColor(wrist_img[0], cv2.COLOR_RGB2BGR))
+                if self.args.vis_eval:
+                    cv2.imshow(self.policy_rollout_window_name, cv2.cvtColor(img[0], cv2.COLOR_RGB2BGR))
+                    cv2.imshow(self.policy_rollout_wrist_window_name, cv2.cvtColor(wrist_img[0], cv2.COLOR_RGB2BGR))
                 # # cv2.imshow(self.policy_rollout_window_name_2, cv2.cvtColor(img[2], cv2.COLOR_RGB2BGR))
                 # # cv2.imshow(self.policy_rollout_wrist_window_name_2, cv2.cvtColor(wrist_img[2], cv2.COLOR_RGB2BGR))
-                # cv2.waitKey(1)
+                    cv2.waitKey(1)
                 # get the current state and record, env.get_sim_state() returns all states in a np.ndarray, we use the state for the model input, compact the state manually
                 sim_state_arr = np.stack([np.concatenate(( x["robot0_eef_pos"],_quat2axisangle(x["robot0_eef_quat"]), x["robot0_gripper_qpos"],)) for x in self.obs_manager], axis=0) # shape: (num_envs, 3+4+1)
                 with self.env_lock:
@@ -239,13 +402,13 @@ class LiberoRunner:
                     obs, reward, done, info = self.env.step(action_editable[self.running_env_indices], id=self.running_env_indices.tolist())  # type of obs, reward, done, info: <class 'numpy.ndarray'>, shape: (running_envs,); obs is an array of dicts
                 with self.lock:
                     self.env_timesteps[self.running_env_indices] += 1
-                    self.running_env_indices = np.where(self.hil_indicator == False)[0]
-                    self.env_running_timesteps = self.env_timesteps[self.running_env_indices]
                     # update the obs_manager for next policy rollout
                     self.obs_manager[self.running_env_indices] = obs
                     self.dones[self.running_env_indices] = self.dones[self.running_env_indices] | done
-                    
-                    
+
+                    ### The same here, we should keep "running indices" the same in the "collection->inference->step->record" process
+                    self.running_env_indices = np.where(self.hil_indicator == False)[0]
+                    self.env_running_timesteps = self.env_timesteps[self.running_env_indices]
                 ########## end inference and action execution ##########
 
                 ########## OOD detection: randomly for now ##########
@@ -262,11 +425,14 @@ class LiberoRunner:
                     self.dones[OOD_env_indices] = False  # set done flag fail for OOD envs
 
                     cprint(f"hil_indicator: {self.hil_indicator}, hil_envs_indices_set: {self.hil_envs_indices_set}, dones: {self.dones}", "yellow")
-
                 ########## end OOD detection ##########
 
                 ########## Timeout detection ##########
-                timeout_env_indices = np.where(self.env_timesteps >= self.max_steps)[0]
+                # timeout_env_indices = np.where(self.env_timesteps >= self.max_steps)[0]
+                timeout_running_env_indices = np.where(self.env_running_timesteps >= self.max_steps)[0]
+                # cprint(f"timeout_running_env_indices: {timeout_running_env_indices}", "red")
+                timeout_env_indices = self.running_env_indices[timeout_running_env_indices]
+                # cprint(f"timeout_env_indices: {timeout_env_indices}", "red")
                 if len(timeout_env_indices) > 0:
                     cprint(f"Env {timeout_env_indices} reached max steps {self.max_steps}, resetting env and switching to next initial state.", "red")
                     self.failure_episodes[timeout_env_indices] += 1
@@ -294,6 +460,11 @@ class LiberoRunner:
                     cprint(f"Env {success_env_indices} succeeded at step {self.env_timesteps[success_env_indices]}.", "green")
                     
                     cprint(f"success_env_indices: {success_env_indices}", "green")
+                    # Save trajectories to h5py before resetting
+                    if self.args.save_traj:
+                        for env_idx in success_env_indices:
+                            self._save_trajectory_to_h5(env_idx, int(self.env_timesteps[env_idx]))
+                    
                     with self.lock:
                         self.init_state_indices[success_env_indices] = (self.init_state_indices[success_env_indices] + 1) % self.initial_states.shape[0]
                         success_init_states = self.initial_states[self.init_state_indices[success_env_indices]]
@@ -310,21 +481,40 @@ class LiberoRunner:
                         self.env_running_timesteps = self.env_timesteps[self.running_env_indices]
                         self.dones[success_env_indices] = False  # reset done flag for succeeded envs
                         self.success_episodes[success_env_indices] += 1
-
+                
                 ########## end success detection ##########
-
-                if self.dones.all():
-                    break
-
                 
             except KeyboardInterrupt:
                 cprint("KeyboardInterrupt detected, exiting evaluation loop.", "red")
                 break
+        
 
-        # cv2.destroyWindow(self.policy_rollout_window_name)
-        # cv2.destroyWindow(self.policy_rollout_wrist_window_name)
-        # cv2.destroyWindow(self.policy_rollout_window_name_2)
-        # cv2.destroyWindow(self.policy_rollout_wrist_window_name_2)
+        if self.args.vis_eval:
+            cv2.destroyWindow(self.policy_rollout_window_name)
+            cv2.destroyWindow(self.policy_rollout_wrist_window_name)
+            # cv2.destroyWindow(self.policy_rollout_window_name_2)
+            # cv2.destroyWindow(self.policy_rollout_wrist_window_name_2)
+
+        # move the h5py file to the final path if save_traj is True
+        ## REPORT: shutil.copy is permission-denied, just move the data manually after the run. ##
+        if self.args.save_traj:
+            h5_filename = self.h5_file.filename
+            self.h5_file.close()
+            try:
+                if not os.path.exists(self.final_h5py_filename):
+                    shutil.copy(h5_filename, self.final_h5py_filename)  # Use copy instead of move
+                else:
+                    cprint(f"File {self.final_h5py_filename} already exists. It will be overwritten.", "red")
+                    os.remove(self.final_h5py_filename)
+                    shutil.copy(h5_filename, self.final_h5py_filename)  # Use copy instead of move
+            except Exception as e:
+                logging.error(f"Error: {e}, yet the file is still saved at {self.final_h5py_filename}")
+            
+            finally:
+                os.remove(h5_filename)  # Remove the source file after copying
+                cprint(f"H5py file copied to: {self.final_h5py_filename}", "green")
+
+        
 
     def start_listening_thread(self):
         """Start the background server thread."""
@@ -341,6 +531,7 @@ class LiberoRunner:
     def stop_threads(self, join_timeout: Optional[float] = 1.0):
         """Request stop and optionally join the thread."""
         self.listening_stop_evt.set()
+        self.conn_handler_stop_ent.set()
         self.HIL_stop_evt.set()
         self._listening_thread.join(timeout=join_timeout)
         self._HIL_thread.join(timeout=join_timeout)
@@ -361,7 +552,7 @@ class LiberoRunner:
         conn.settimeout(1.0)
         buffer = b""
         self.HIL_active = False  # whether we've received START and are actively listening for actions
-        while not self.listening_stop_evt.is_set():
+        while not self.conn_handler_stop_ent.is_set():
             try:
                 data = conn.recv(4096)
             except socket.timeout:
@@ -376,14 +567,12 @@ class LiberoRunner:
                 if not text:
                     continue
                 parsed = self._parse_line(text)
-                # cprint(f"parsed data from {addr}: {parsed}", "magenta")
                 # control commands
                 if isinstance(parsed, str) and parsed.lower() == "start":
                     cprint(f"Received START from {addr}", "green")
                     if not self.HIL_active:
                         with self.lock:
                             self.hil_indices = np.where(self.hil_indicator == True)[0]
-                            self.HIL_id = np.array([self.hil_indices[0]])
                         cprint(f"session active, current HIL env indices: {self.hil_indices}", "green")
                         if self.hil_indices.size == 0:
                             cprint(f"No HIL envs currently, stopping the session.", "yellow")
@@ -391,18 +580,17 @@ class LiberoRunner:
                                 self.HIL_active = False
                             continue
                         else:
+                            with self.lock:
+                                self.HIL_id = np.array([self.hil_indices[0]])
                             # set the counterfeit env to the HIL_id's current state
                             with self.env_lock:
                                 HIL_state = np.array(self.env.get_sim_state())[self.HIL_id]
-                            cprint(f"HIL_state.shape: {HIL_state}", "cyan")
                             with self.counterfeit_env_lock:
                                 # set the counterfeit env to the HIL env's last finished state
                                 self.HIL_env.reset(id=self.HIL_counterfeit_id.tolist())
                                 obs_HIL = self.HIL_env.set_init_state(HIL_state, id=self.HIL_counterfeit_id.tolist())
                             with self.lock:
                                 self.obs_manager[self.HIL_id] = obs_HIL
-                                                     
-                        
                         cprint(f"Current HIL env id: {self.HIL_id}", "magenta")
                         with self.lock:
                             # activate HIL control finally
@@ -413,13 +601,15 @@ class LiberoRunner:
                     # TODO, when stop, we should return the HIL envs to normal control, by setting hil_indicator false, and pop the env indices from hil_envs_indices_set
                     if self.HIL_active: 
                         with self.lock:
+                            self.HIL_active = False  # stop the env immediately, then do the following things
+
+                        with self.lock:
                             self.init_state_indices[self.HIL_id] = (self.init_state_indices[self.HIL_id] + 1) % self.initial_states.shape[0]
                             stop_init_states = self.initial_states[self.init_state_indices[self.HIL_id]]
 
                         with self.counterfeit_env_lock:
                             self.HIL_env.reset(id=self.HIL_counterfeit_id.tolist())
                             obs_stop = self.HIL_env.set_init_state(stop_init_states, id=self.HIL_counterfeit_id.tolist())
-                            cprint(f"obs_stop.keys: {obs_stop[0].keys()}", "magenta")
 
                         with self.lock:
                             self.obs_manager[self.HIL_id] = obs_stop
@@ -427,14 +617,21 @@ class LiberoRunner:
                             self.dones[self.HIL_id] = False  # reset done flag for succeeded envs
                             self.hil_indicator[self.HIL_id] = False
                             self.hil_envs_indices_set.discard(self.HIL_id[0])
-                            # update running_env_indices
-                            self.running_env_indices = np.where(self.hil_indicator == False)[0]
-                            self.env_running_timesteps = self.env_timesteps[self.running_env_indices]
+
+                            #### a bug here, we don't update the running_env_indices and the corresponding env_running timesteps here now, because if when we update the indices between the "step" and the "record" process in the main eval loop, it will cause dim mismatch between the returned obs from "step" and the obs that the "record" want to record. We shouldn't intervene the update of "running indices" and "running timesteps" in the main loop. ####
+
+                            # self.running_env_indices = np.where(self.hil_indicator == False)[0]
+                            # self.env_running_timesteps = self.env_timesteps[self.running_env_indices]
                             cprint(f"hil_indicator: {self.hil_indicator}, hil_envs_indices_set: {self.hil_envs_indices_set}", "yellow")
                         
                         cprint(f"Env {self.HIL_id} returned to normal policy control.", "yellow")
-                    with self.lock:
-                        self.HIL_active = False
+                    
+                    else: 
+                        with self.lock:
+                            self.HIL_active = False
+                    
+                    if not self.conn_handler_stop_ent.is_set():
+                        self.conn_handler_stop_ent.set()
                     continue
 
                 if self.HIL_active and isinstance(parsed, list) and len(parsed) == len(LIBERO_DUMMY_ACTION) :
@@ -459,11 +656,14 @@ class LiberoRunner:
             cprint(f"Manual-control server listening on {self.args.spm_host}:{self.args.spm_port}", "green")
             while not self.listening_stop_evt.is_set():
                 try:
+                    # cprint(f"try accepting msgs from addr!!!!", "yellow")
                     conn, addr = srv.accept()
                 except socket.timeout:
+                    # cprint(f"socket timeout!!!!", "yellow")
                     continue
-                cprint(f"Manual-control client connected from {addr}", "green")
+                cprint(f"Manual-control client connected from {addr}", "yellow")
                 self._conn_listener(conn, addr)
+                self.conn_handler_stop_ent.clear()
                 cprint(f"Manual-control client from {addr} disconnected", "yellow")
         finally:
             try:
@@ -475,124 +675,133 @@ class LiberoRunner:
     def _HIL_loop(self):
         
         while not self.HIL_stop_evt.is_set():
-            try:
-                # action payloads are list/tuple/ndarray of floats
-                if not self.HIL_active:
-                    if self.HIL_window_active:
-                        cv2.destroyWindow(self.HIL_window_name)
-                        cv2.destroyWindow(self.HIL_wrist_window_name)
-                        self.HIL_window_active = False
-                    time.sleep(0.05)
-                    continue
-                
-                if not self.HIL_window_active:
-                    win_w, win_h = int(self.args.resize_size * 2), int(self.args.resize_size * 2)
-                    cv2.namedWindow(self.HIL_wrist_window_name, cv2.WINDOW_NORMAL)
-                    cv2.namedWindow(self.HIL_window_name, cv2.WINDOW_NORMAL)
-                    cv2.resizeWindow(self.HIL_window_name, win_w, win_h)
-                    cv2.resizeWindow(self.HIL_wrist_window_name, win_w, win_h)
-                    self.HIL_window_active = True
-                
-                
-                # save state and images (try to match the main-loop recording format)
-                sim_state = np.stack([np.concatenate(( x["robot0_eef_pos"],_quat2axisangle(x["robot0_eef_quat"]), x["robot0_gripper_qpos"],)) for x in self.obs_manager[self.HIL_id]], axis=0)
-                cprint(f"sim_state.shape: {sim_state.shape}", "magenta")
-
-                t_HID = int(self.env_timesteps[self.HIL_id])
-                if t_HID < self.input_states_buffer.shape[0]:
-                    with self.lock:
-                        self.input_states_buffer[t_HID, self.HIL_id] = sim_state
-                img = np.stack([np.ascontiguousarray(x["agentview_image"][::-1, ::-1]) for x in self.obs_manager[self.HIL_id]], axis=0)
-                wrist_img = np.stack([np.ascontiguousarray(x["robot0_eye_in_hand_image"][::-1, ::-1]) for x in self.obs_manager[self.HIL_id]], axis=0)
-                img = image_tools.convert_to_uint8(image_tools.resize_with_pad(img, self.args.resize_size, self.args.resize_size))
-                wrist_img = image_tools.convert_to_uint8(image_tools.resize_with_pad(wrist_img, self.args.resize_size, self.args.resize_size))
-                cprint(f"img.shape: {img.shape}, wrist_img.shape: {wrist_img.shape}", "magenta")
-                cv2.imshow(self.HIL_window_name, cv2.cvtColor(img[0], cv2.COLOR_RGB2BGR))
-                cv2.imshow(self.HIL_wrist_window_name, cv2.cvtColor(wrist_img[0], cv2.COLOR_RGB2BGR))
-                cv2.waitKey(1)
-
-                cprint(f"t_HID: {t_HID}", "magenta")
-                if t_HID < self.img_buffer.shape[0]:
-                    with self.lock:
-                        self.img_buffer[t_HID, self.HIL_id] = img
-                if t_HID < self.wrist_img_buffer.shape[0]:
-                    with self.lock:
-                        self.wrist_img_buffer[t_HID, self.HIL_id] = wrist_img
-
-                cprint(f"HIL active for env id: {self.HIL_id}", "magenta")
-                # get action from queue
-                try:
-                    action_arr = self.action_queue.get(timeout=1.0)
-                except queue.Empty:
-                    cprint(f"No action received yet waiting for action...", "yellow")
-                    continue  
-                
-                # clamp to buffer sizes
-                if t_HID < self.action_buffer.shape[0]:
-                    with self.lock:
-                        self.action_buffer[t_HID, self.HIL_id] = action_arr       
-
-                # Step env for HIL indices
-                cprint(f"action_arr from HIL_queue: {action_arr}", "magenta")
-                with self.counterfeit_env_lock:
-                    obs_id, reward, done, info = self.HIL_env.step(action_arr, id=self.HIL_counterfeit_id.tolist())
-
-                with self.lock:
-                    self.env_timesteps[self.HIL_id] += 1
-                    self.obs_manager[self.HIL_id] = obs_id
-                    self.dones[self.HIL_id] = self.dones[self.HIL_id] | done
-
-                
-
-                # also try to record sim state from env.get_sim_state() if available
-                t_HID = int(self.env_timesteps[self.HIL_id])
-                cprint(f"Recording at timestep {t_HID} for env {self.HIL_id}", "magenta")
-                with self.counterfeit_env_lock:
-                    rec_states = np.array(self.HIL_env.get_sim_state())
-                if t_HID < self.state_record_buffer.shape[0]:
-                    with self.lock:
-                        self.state_record_buffer[t_HID, self.HIL_id] = rec_states
-                
-                cprint(f"rec_states.shape: {rec_states.shape}", "magenta")
-                cprint(f"done: {done}, self.dones: {self.dones}", "magenta")
-                
-                if self.dones[self.HIL_id]:
-                    cprint(f"Env {self.HIL_id} finished (done) under HIL control.", "magenta")
-                    # TODO save the buffers
-                        
-                    with self.lock:
-                        self.init_state_indices[self.HIL_id] = (self.init_state_indices[self.HIL_id] + 1) % self.initial_states.shape[0]
-                        success_init_states = self.initial_states[self.init_state_indices[self.HIL_id]]
-                    with self.counterfeit_env_lock:
-                        self.HIL_env.reset(id=self.HIL_counterfeit_id.tolist())
-                        obs_success = self.HIL_env.set_init_state(success_init_states, id=self.HIL_counterfeit_id.tolist())
-
-                    with self.lock:
-                        self.obs_manager[self.HIL_id] = obs_success
-                        self.env_timesteps[self.HIL_id] = 0
-                        self.dones[self.HIL_id] = False  # reset done flag for succeeded envs
-                        self.success_episodes[self.HIL_id] += 1
-                        self.hil_indicator[self.HIL_id] = False
-                        self.hil_envs_indices_set.discard(self.HIL_id)
-                        cprint(f"hil_indicator: {self.hil_indicator}, hil_envs_indices_set: {self.hil_envs_indices_set}", "yellow")
-
+            # try:
+            # action payloads are list/tuple/ndarray of floats
+            if not self.HIL_active:
+                if self.HIL_window_active:
+                    cprint(f"turning off HIL windows", "red")
                     cv2.destroyWindow(self.HIL_window_name)
                     cv2.destroyWindow(self.HIL_wrist_window_name)
-                    cprint(f"Env {self.HIL_id} returned to normal policy control.", "yellow")
-                    with self.lock:
-                        self.HIL_active = False  # end the HIL session after one episode
-                else: 
-                    cprint(f"Env {self.HIL_id} continuing HIL control at timestep {self.env_timesteps[self.HIL_id]}.", "magenta")
-
-                # sleep to match human-control fps
-                time.sleep(1.0 / float(max(1, self.args.hil_fps)))
-
-                cprint(f"sleep for {1.0 / float(max(1, self.args.hil_fps))} seconds to match HIL FPS", "magenta")
-
-            except Exception as e:
-                cprint(f"Exception in HIL loop: {e}", "red")
-                time.sleep(0.1)
+                    self.HIL_window_active = False
+                time.sleep(0.05)
                 continue
+            
+            if not self.HIL_window_active:
+                win_w, win_h = int(self.args.resize_size * 2), int(self.args.resize_size * 2)
+                cv2.namedWindow(self.HIL_wrist_window_name, cv2.WINDOW_NORMAL)
+                cv2.namedWindow(self.HIL_window_name, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow(self.HIL_window_name, win_w, win_h)
+                cv2.resizeWindow(self.HIL_wrist_window_name, win_w, win_h)
+                self.HIL_window_active = True
+            
+            
+            # save state and images (try to match the main-loop recording format)
+            sim_state = np.stack([np.concatenate(( x["robot0_eef_pos"],_quat2axisangle(x["robot0_eef_quat"]), x["robot0_gripper_qpos"],)) for x in self.obs_manager[self.HIL_id]], axis=0)
+            # cprint(f"sim_state.shape: {sim_state.shape}", "magenta")
+
+            t_HID = int(self.env_timesteps[self.HIL_id])
+            if t_HID < self.input_states_buffer.shape[0]:
+                with self.lock:
+                    self.input_states_buffer[t_HID, self.HIL_id] = sim_state
+            img = np.stack([np.ascontiguousarray(x["agentview_image"][::-1, ::-1]) for x in self.obs_manager[self.HIL_id]], axis=0)
+            wrist_img = np.stack([np.ascontiguousarray(x["robot0_eye_in_hand_image"][::-1, ::-1]) for x in self.obs_manager[self.HIL_id]], axis=0)
+            img = image_tools.convert_to_uint8(image_tools.resize_with_pad(img, self.args.resize_size, self.args.resize_size))
+            wrist_img = image_tools.convert_to_uint8(image_tools.resize_with_pad(wrist_img, self.args.resize_size, self.args.resize_size))
+            # cprint(f"img.shape: {img.shape}, wrist_img.shape: {wrist_img.shape}", "magenta")
+            cv2.imshow(self.HIL_window_name, cv2.cvtColor(img[0], cv2.COLOR_RGB2BGR))
+            cv2.imshow(self.HIL_wrist_window_name, cv2.cvtColor(wrist_img[0], cv2.COLOR_RGB2BGR))
+            cv2.waitKey(1)
+
+            cprint(f"t_HID: {t_HID}", "magenta")
+            if t_HID < self.img_buffer.shape[0]:
+                with self.lock:
+                    self.img_buffer[t_HID, self.HIL_id] = img
+            if t_HID < self.wrist_img_buffer.shape[0]:
+                with self.lock:
+                    self.wrist_img_buffer[t_HID, self.HIL_id] = wrist_img
+
+            # cprint(f"HIL active for env id: {self.HIL_id}", "magenta")
+            # get action from queue
+            try:
+                action_arr = self.action_queue.get(timeout=1.0)
+            except queue.Empty:
+                cprint(f"No action received yet waiting for action...", "yellow")
+                continue  
+            
+            # clamp to buffer sizes
+            if t_HID < self.action_buffer.shape[0]:
+                with self.lock:
+                    self.action_buffer[t_HID, self.HIL_id] = action_arr      
+                    self.hil_indicator_buffer[t_HID, self.HIL_id] = 1 
+
+            # Step env for HIL indices
+            cprint(f"action_arr from HIL_queue: {action_arr}", "magenta")
+            with self.counterfeit_env_lock:
+                obs_id, reward, done, info = self.HIL_env.step(action_arr, id=self.HIL_counterfeit_id.tolist())
+
+            with self.lock:
+                self.env_timesteps[self.HIL_id] += 1
+                self.obs_manager[self.HIL_id] = obs_id
+                self.dones[self.HIL_id] = self.dones[self.HIL_id] | done
+
+            # also try to record sim state from env.get_sim_state() if available
+            t_HID = int(self.env_timesteps[self.HIL_id])
+            # cprint(f"Recording at timestep {t_HID} for env {self.HIL_id}", "magenta")
+            with self.counterfeit_env_lock:
+                rec_states = np.array(self.HIL_env.get_sim_state())
+            if t_HID < self.state_record_buffer.shape[0]:
+                with self.lock:
+                    self.state_record_buffer[t_HID, self.HIL_id] = rec_states
+            
+            # cprint(f"rec_states.shape: {rec_states.shape}", "magenta")
+            cprint(f"done: {done}, self.dones: {self.dones}", "magenta")
+            
+            if self.dones[self.HIL_id]:
+                cprint(f"Env {self.HIL_id} finished (done) under HIL control.", "yellow")
+                cv2.destroyWindow(self.HIL_window_name)
+                cv2.destroyWindow(self.HIL_wrist_window_name)
+                cprint(f"Env {self.HIL_id} returned to normal policy control.", "yellow")
+                if not self.conn_handler_stop_ent.is_set():
+                    self.conn_handler_stop_ent.set()
+
+                with self.lock:
+                    self.HIL_active = False  # end the HIL session after one episode
+                    self.HIL_window_active = False
+                # TODO save the buffers
+                # Save trajectory to h5py before resetting
+                if self.args.save_traj:
+                    self._save_trajectory_to_h5(int(self.HIL_id[0]), int(self.env_timesteps[self.HIL_id[0]]))
+                    cprint(f"save HIL traj of env {self.HIL_id[0]} to dataset", "yellow")
+                    
+                with self.lock:
+                    self.init_state_indices[self.HIL_id] = (self.init_state_indices[self.HIL_id] + 1) % self.initial_states.shape[0]
+                    success_init_states = self.initial_states[self.init_state_indices[self.HIL_id]]
+                with self.counterfeit_env_lock:
+                    self.HIL_env.reset(id=self.HIL_counterfeit_id.tolist())
+                    obs_success = self.HIL_env.set_init_state(success_init_states, id=self.HIL_counterfeit_id.tolist())
+
+                with self.lock:
+                    self.obs_manager[self.HIL_id] = obs_success
+                    self.env_timesteps[self.HIL_id] = 0
+                    self.dones[self.HIL_id] = False  # reset done flag for succeeded envs
+                    self.success_episodes[self.HIL_id] += 1
+                    self.hil_indicator[self.HIL_id] = False
+                    self.hil_envs_indices_set.discard(self.HIL_id[0])
+                    cprint(f"hil_indicator: {self.hil_indicator}, hil_envs_indices_set: {self.hil_envs_indices_set}", "yellow")
+
+                
+            else: 
+                cprint(f"Env {self.HIL_id} continuing HIL control at timestep {self.env_timesteps[self.HIL_id]}.", "magenta")
+
+            # sleep to match human-control fps
+            time.sleep(1.0 / float(max(1, self.args.hil_fps)))
+
+            # cprint(f"sleep for {1.0 / float(max(1, self.args.hil_fps))} seconds to match HIL FPS", "magenta")
+
+            # except Exception as e:
+            #     cprint(f"Exception in HIL loop: {e}", "red")
+            #     time.sleep(0.1)
+            #     continue
 
 @dataclasses.dataclass
 class Args:
@@ -627,7 +836,10 @@ class Args:
     video_out_path: str = "data/libero/videos"  # Path to save videos
     seed: int = 7  # Random Seed (for reproducibility)
     data_record_path: str = "data/libero/h5py_records"  # Path to save h5py records
+    data_record_tmp_path: str = "data_tmp/libero/h5py_records"  # use a tmp path cause the current ./data path doesn't support h5py.flush()
     max_buffer_size: int = 1500  # max buffer size for action/state/img recording per env
+    save_traj: bool = False
+    vis_eval: bool = False
 
 def get_libero_runner(args: Args) -> LiberoRunner:
     return LiberoRunner(args)

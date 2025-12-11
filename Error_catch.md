@@ -2,18 +2,15 @@
 
 ```bash
 conda deactivate
-
 export PYENV_VERSION=system
-
+export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
 source examples/libero/.venv/bin/activate
-
 which python
 
-export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
 
 export CUDA_VISIBLE_DEVICES=7
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
+
 
 ```
 

@@ -45,6 +45,7 @@ source examples/libero/.venv/bin/activate
 uv pip sync examples/libero/requirements.txt third_party/libero/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu113 --index-strategy=unsafe-best-match
 uv pip install -e packages/openpi-client
 uv pip install -e third_party/libero
+uv pip install h5py==3.7.0  # to match numpy 1.22.4 
 export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
 
 
@@ -55,9 +56,12 @@ CUDA_VISIBLE_DEVICES=2 MUJOCO_GL=glx python examples/libero/main.py
 # CUDA_VISIBLE_DEVICES=1 MUJOCO_GL=glx python examples/libero/run_parallel.py --args.num-envs 20 --args.task_suite_name libero_90
 CUDA_VISIBLE_DEVICES=2 MUJOCO_GL=glx python examples/libero/run_parallel.py --args.num-envs 20 --args.task_suite_name libero_90
 
-CUDA_VISIBLE_DEVICES=7 MUJOCO_GL=glx python examples/libero/run_parallel_with_visualization.py --args.num-envs 5 --args.task_suite_name libero_spatial
+CUDA_VISIBLE_DEVICES=1 MUJOCO_GL=glx python examples/libero/run_parallel_with_hil.py --args.num-envs 10 --args.task_suite_name libero_spatial
 
-CUDA_VISIBLE_DEVICES=7 MUJOCO_GL=glx python examples/libero/run_parallel_with_hil.py --args.num-envs 5 --args.task_suite_name libero_spatial
+CUDA_VISIBLE_DEVICES=1 MUJOCO_GL=glx python examples/libero/run_parallel_with_hil.py --args.num-envs 10 --args.task_suite_name libero_spatial --args.save_traj 
+
+--args.data_record_path /data/yijin/openpi/data/libero/h5py_records
+
 
 
 
@@ -76,7 +80,7 @@ Terminal window 2:
 # Run the server
 # export SERVER_ARGS="--env LIBERO policy:checkpoint --policy.config pi05_libero --policy.dir ./my_custom_checkpoint"
 CUDA_VISIBLE_DEVICES=2 uv run scripts/serve_policy.py --env LIBERO policy:checkpoint --policy.config pi05_libero --policy.dir /data/yijin/openpi/checkpoints/pi05_libero # single env
-CUDA_VISIBLE_DEVICES=6 uv run scripts/serve_policy.py --env LIBERO --is-batched policy:checkpoint --policy.config pi05_libero --policy.dir /data/yijin/openpi/checkpoints/pi05_libero # parallel env
+CUDA_VISIBLE_DEVICES=2 uv run scripts/serve_policy.py --env LIBERO --is-batched policy:checkpoint --policy.config pi05_libero --policy.dir /mnt/data/yijin/openpi/checkpoints/pi05_libero # parallel env
 ```
 
 ## Results

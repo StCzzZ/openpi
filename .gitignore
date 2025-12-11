@@ -2,6 +2,8 @@
 assets/
 checkpoints/
 checkpoints
+data_tmp/
+data
 data/
 wandb/
 
@@ -168,5 +170,5 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# cudnn for tensorflow-gpu
+# cudnn for tensorflow-gou
 cudnn/
