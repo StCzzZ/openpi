@@ -1,0 +1,41 @@
+---
+alwaysApply: true
+---
+
+
+# 通用编码标准
+- 使用`typing`库把所有函数的输入变量类型和输出类型都显式声明。
+- 使用`dataclasses`库对于所有主函数做参数类型、名字、默认值定义
+- 使用`tyro.cli`配合`dataclass`传递主函数的参数
+- 使用`logging`来进行各种信息的输出和log。
+- 所有的代码注释都使用英语。
+- 使用`from scipy.spatial.transform import Rotation as R`作为所有旋转表示的类。
+- 尽量删除无用的debug用的注释代码（比如`print`等）。
+- 许多脚本都是通过uv run执行的，因此无需在conda环境找不到某个第三方库时就运行pip install，如确有需要重新安装的库，可以请求我的许可
+- 独立的工具脚本放入`scripts`目录下,如非必要，不用写非常复杂的独立工具脚本。
+- 测试脚本放入`tests`目录下，如非必要，不用写非常复杂的独立测试脚本。
+- 共享的工具函数库放入`utils`目录下，如非必要，不用写很复杂的工具函数。
+
+# Code Stucture
+
+## Core Components
+
+### 1. openpi source code (`src/openpi`)
+
+The source code for pi0 and pi0.5 VLA models, including data processing, training scripts, and model architecture.
+
+### 2. openpi client (`packages/openpi-client/src/openpi_client`)
+
+The openpi client contains utilities for policy server, which are mainly used for policy inference (such as `scripts/serve_policy.py`).
+
+### 3. customized reward model (`reward_model/`)
+
+The reward model that estimates task progress given pre-trained Vision-Language embeddings.
+
+### 4. Third-party benchmarks (`third_party`)
+
+Simulated benchmarks including LIBERO, aloha, DINOv2 visual encoder, and Qwen3-VL example. We mainly use LIBERO as our simulation.
+
+### 5. Shared utilities (`utils`)
+
+If exists, it contains utilies that are shared widely in the project.

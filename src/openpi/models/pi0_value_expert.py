@@ -11,6 +11,7 @@ from openpi.models import model as _model
 from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
+from openpi.models.utils.welford import Welford
 from openpi.shared import array_typing as at
 
 logger = logging.getLogger("openpi")
@@ -129,6 +130,9 @@ class Pi0ValueExpert(_model.BaseModel):
             self.value_out_proj = nnx.Linear(value_config.width, config.n_bins, rngs=rngs)
         else:
             self.value_out_proj = nnx.Linear(value_config.width, 1, rngs=rngs)
+
+        # Welford running statistics for value progress normalization.
+        self.progress_stat = nnx.BatchStat(Welford.create((1,)))
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -340,7 +344,7 @@ class Pi0ValueExpert(_model.BaseModel):
                 next_value_pred = -nnx.sigmoid(next_value_pred)[..., -1]
                 curr_value_pred = -value_pred[..., -1]
             raw_progress = next_value_pred - curr_value_pred # (bsz, 1)
-            normalized_progress = self._normalize_progress(raw_progress)
+            normalized_progress = self._normalize_progress(raw_progress, train=train)
             action_loss = normalized_progress * action_loss
             return action_loss
 
@@ -454,12 +458,17 @@ class Pi0ValueExpert(_model.BaseModel):
         value_suffix_out = jnp.split(value_output[0], [value_prefix_tokens.shape[1]], axis=1)[1]
         return value_suffix_out[:, 0, :] # (bsz, emb)
 
-    @override
-    def _normalize_progress(self, raw_progress: at.Float[at.Array, "b 1"]) -> at.Float[at.Array, "b 1"]:
-        # Simple per-batch normalization to avoid persistent running state.
-        batch_mean = jnp.mean(raw_progress, axis=0, keepdims=True)
-        batch_var = jnp.var(raw_progress, axis=0, keepdims=True)
-        batch_std = jnp.sqrt(batch_var + 1e-8)
-        normalized_prog = (raw_progress - (batch_mean - 2.0 * batch_std)) / (4.0 * batch_std + 1e-8)
+    def _normalize_progress(self, raw_progress: at.Float[at.Array, "b 1"], train: bool) -> at.Float[at.Array, "b 1"]:
+        # Update running stats during training.
+        if train:
+            self.progress_stat.value = self.progress_stat.value.add_all(raw_progress)
+
+        # Use running stats for normalization.
+        stats = self.progress_stat.value
+        mean = stats.mean
+        # We use population variance (ddof=0) for normalization.
+        std = jnp.sqrt(stats.var_p + 1e-8)
+
+        normalized_prog = (raw_progress - (mean - 2.0 * std)) / (4.0 * std + 1e-8)
         normalized_prog = jax.lax.stop_gradient(jnp.clip(normalized_prog, 0.0, 1.0))
         return normalized_prog
