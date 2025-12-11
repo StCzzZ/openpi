@@ -124,8 +124,10 @@ def main(args: Args) -> None:
         tcp_rot_history = [CANONICAL_EULER_ANGLES] # to prevent gimbal lock problem of euler angles in the observation space
         t = 0
 
-        while t < args.max_steps:
-            if robot_env.keyboard.finish:
+        while t <= args.max_steps:
+            if robot_env.keyboard.finish or t == args.max_steps:
+                if t == args.max_steps:
+                    logging.info(f"Rollout {i+1}/{args.num_rollouts} timeout")
                 # Finalize episode
                 for key in episode_buffers.keys():
                     episode_buffers[key] = np.stack(episode_buffers[key], axis=0)
@@ -239,8 +241,6 @@ def main(args: Args) -> None:
                 if "value" not in episode_buffers:
                     episode_buffers["value"] = []
                 episode_buffers["value"].append(model_output["value"])
-
-        logging.info(f"Rollout {i+1}/{args.num_rollouts} timeout")
 
 
 if __name__ == "__main__":
