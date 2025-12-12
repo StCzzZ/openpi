@@ -331,9 +331,8 @@ def restore_params(
             ),
         )["params"]
 
-    # If the params were saved with `save_state` during openpi training, every key path will end with "value", which is
-    # added by `nnx.State`. We remove the "value" suffix here and always return what NNX calls a "pure dict".
+    # If the params were saved with `save_state` during openpi training, many key paths end with the "value" suffix added
+    # by `nnx.State`. Strip the suffix wherever it appears so the tree matches `state.to_pure_dict()`.
     flat_params = traverse_util.flatten_dict(params)
-    if all(kp[-1] == "value" for kp in flat_params):
-        flat_params = {kp[:-1]: v for kp, v in flat_params.items()}
+    flat_params = {kp[:-1] if kp and kp[-1] == "value" else kp: v for kp, v in flat_params.items()}
     return traverse_util.unflatten_dict(flat_params)
