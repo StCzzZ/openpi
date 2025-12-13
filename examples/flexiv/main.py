@@ -183,7 +183,7 @@ def main(args: Args) -> None:
                 # Save to buffer
                 episode_buffers['wrist_cam'].append(robot_state['wrist_img'])
                 episode_buffers['side_cam'].append(robot_state['side_img'])
-                episode_buffers['tcp_pose'].append(robot_state['tcp_pose'])
+                episode_buffers['tcp_pose'].append(np.concatenate((robot_state['tcp_pose'][:3], standard_tcp_rot), axis=0))
                 episode_buffers['joint_pos'].append(robot_state['joint_pos'])
                 episode_buffers['action'].append(action)
                 episode_buffers['action_mode'].append(ROBOT)
