@@ -235,7 +235,14 @@ class Pi0SuffixValue(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
+        self, 
+        rng: at.KeyArrayLike, 
+        observation: _model.Observation, 
+        actions: _model.Actions, 
+        value: _model.Values | None = None, 
+        next_obs: _model.Observation | None = None, 
+        *, 
+        train: bool = False
     ) -> tuple[at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b 1"]]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
@@ -535,7 +542,14 @@ class Pi0PrefixValue(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, value: _model.Values, *, train: bool = False
+        self, 
+        rng: at.KeyArrayLike, 
+        observation: _model.Observation, 
+        actions: _model.Actions, 
+        value: _model.Values | None = None, 
+        next_obs: _model.Observation | None = None, 
+        *, 
+        train: bool = False
     ) -> tuple[at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b ah"], at.Float[at.Array, "*b 1"]]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
